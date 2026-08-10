@@ -1,0 +1,17 @@
+# Developed on Windows, built and tested on Linux in CI. Normalise to LF in the repository so the
+# two never produce whitespace-only diffs, and so shell scripts stay executable in the container.
+* text=auto eol=lf
+
+# Binary / generated: never touch these.
+*.png binary
+*.jpg binary
+*.duckdb binary
+*.parquet binary
+*.xlsx binary
+
+# PowerShell scripts stay CRLF -- some Windows PowerShell hosts are picky about LF-only files.
+*.ps1 text eol=crlf
+
+# Lockfiles are generated; collapse them in diffs and mark them so GitHub language stats ignore them.
+uv.lock linguist-generated=true
+package-lock.json linguist-generated=true
