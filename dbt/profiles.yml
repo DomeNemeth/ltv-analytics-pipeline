@@ -1,0 +1,13 @@
+# Committed deliberately. The warehouse path is the only environment-specific value, and it comes
+# from an environment variable that `ltv transform` sets from Settings -- so the repo is
+# self-contained and nothing depends on a ~/.dbt directory that exists on one machine only.
+#
+# There are no credentials here and none anywhere else in this repo: DuckDB is a local file and
+# every data source is a public download.
+ltv:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('LTV_DUCKDB_PATH') }}"
+      threads: 4

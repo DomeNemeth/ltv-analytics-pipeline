@@ -1,0 +1,36 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: raw
+    description: >
+      Faithful, unfiltered copies of source files, written by `ltv ingest`. Nothing in this schema is
+      cleaned or deduplicated -- every cleaning decision happens in dbt where it is visible, tested,
+      and reviewable rather than buried inside a loader.
+    tables:
+      - name: cdnow_transactions
+        description: >
+          The CDNOW master dataset: the complete purchase history through June 1998 of the 23,570
+          customers who made their first purchase at CDNOW in Q1 1997. One row per line item, not
+          per order -- a customer can have several rows on the same day.
+
+          Fader, Peter S. and Bruce G. S. Hardie (2001), "Forecasting Repeat Sales at CDNOW:
+          A Case Study", Interfaces, 31 (May-June), Part 2 of 2, S94-S107.
+        columns:
+          - name: customer_id
+            description: Stable customer identifier, 1-23570.
+            data_tests: [not_null]
+          - name: order_date
+            description: Date of the line item. No time component exists in the source.
+            data_tests: [not_null]
+          - name: quantity
+            description: Number of CDs on this line item. Always positive in this dataset.
+            data_tests: [not_null]
+          - name: gross_amount
+            description: >
+              Line item total in dollars. 80 rows are exactly 0.00 -- promotional giveaways, kept
+              deliberately. See int_customers__rfm_calibration for how they are handled.
+            data_tests: [not_null]
+          - name: _line_number
+            description: 1-based line in the source file, so any row traces back to its origin.
+            data_tests: [not_null, unique]

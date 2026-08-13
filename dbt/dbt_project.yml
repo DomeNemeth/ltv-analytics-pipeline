@@ -1,0 +1,33 @@
+name: "ltv"
+version: "0.1.0"
+profile: "ltv"
+
+model-paths: ["models"]
+test-paths: ["tests"]
+macro-paths: ["macros"]
+clean-targets: ["target", "dbt_packages"]
+
+flags:
+  # A portfolio repo should not phone home from a reviewer's machine.
+  send_anonymous_usage_stats: false
+
+vars:
+  # The analysis window, in weeks. 39/39 is the canonical Fader & Hardie CDNOW split, which is what
+  # makes the Phase 4 error metrics comparable to published benchmarks.
+  #
+  # These are defaults, so `dbt build` works standalone for anyone who wants to run dbt directly.
+  # `ltv transform` overrides them from Settings, which is the real source of truth at runtime.
+  # tests/test_transform.py asserts these two defaults cannot drift apart.
+  calibration_weeks: 39
+  holdout_weeks: 39
+
+models:
+  ltv:
+    staging:
+      # Thin renames over raw. Materializing them would waste space and hide staleness.
+      +materialized: view
+    intermediate:
+      +materialized: view
+      # The per-customer summaries are read repeatedly by Python (the model fit), by the marts, and
+      # by the dashboard. Those are the only ones worth paying for as tables.
+      +tags: ["intermediate"]
