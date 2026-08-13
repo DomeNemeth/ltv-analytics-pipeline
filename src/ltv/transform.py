@@ -76,6 +76,38 @@ def _require_raw_data(settings: Settings) -> None:
         )
 
 
+def _release_warehouse() -> None:
+    """Close the DuckDB connections dbt opened.
+
+    Running dbt in-process means its adapter keeps a connection to the warehouse alive after the
+    invocation returns. DuckDB refuses a second connection to the same file under a different
+    configuration, so the next stage that opens the warehouse read-only fails with
+
+        Can't open a connection to same database file with a different configuration
+
+    which names neither dbt nor the stage that actually left the handle open. This matters well
+    beyond tests: the Phase 6 flow is dbt -> Python -> dbt in a single process, and the Python
+    stage in the middle is exactly the read-only reader that would hit it.
+
+    dbt-duckdb registers this same cleanup with ``atexit``, which is too late to help a process that
+    keeps running.
+    """
+    import gc
+
+    from dbt.adapters.duckdb.connections import DuckDBConnectionManager
+    from dbt.adapters.factory import reset_adapters
+
+    # Two separate references have to go: dbt's adapter registry, and dbt-duckdb's class-level
+    # environment cache. Releasing either alone leaves the other holding the handle open.
+    reset_adapters()
+    DuckDBConnectionManager.close_all_connections()
+
+    # close_all_connections only drops its reference; the file handle is released when the
+    # connection object is collected. CPython would normally do that immediately on refcount zero,
+    # but dbt's object graph contains cycles, so the collector has to be asked.
+    gc.collect()
+
+
 def run_dbt(args: Sequence[str] | None = None, settings: Settings | None = None) -> None:
     """Invoke dbt against the project warehouse.
 
@@ -120,7 +152,10 @@ def run_dbt(args: Sequence[str] | None = None, settings: Settings | None = None)
     ]
 
     with _dbt_environment(settings):
-        result = dbtRunner().invoke(invocation)
+        try:
+            result = dbtRunner().invoke(invocation)
+        finally:
+            _release_warehouse()
 
     if not result.success:
         raise TransformError(
