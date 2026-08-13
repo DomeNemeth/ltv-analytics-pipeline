@@ -1,0 +1,149 @@
+version: 2
+
+models:
+  - name: int_transactions__unioned
+    description: >
+      All sources' line items in one relation, conforming to the staging contract. The only place
+      cross-source unioning happens.
+    columns:
+      - name: customer_id
+        data_tests: [not_null]
+      - name: order_date
+        data_tests: [not_null]
+      - name: source
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["cdnow"]
+
+  - name: int_sources__analysis_windows
+    description: >
+      One row per source giving the calibration/holdout split. The single definition of the cutoff.
+    columns:
+      - name: source
+        data_tests: [not_null, unique]
+      - name: calibration_start
+        description: First day of the calibration window, inclusive. The source's first order date.
+        data_tests: [not_null]
+      - name: calibration_end
+        description: >
+          Last day of the calibration window, inclusive. No calibration feature may reference a
+          later date.
+        data_tests: [not_null]
+      - name: holdout_start
+        description: Day after calibration_end.
+        data_tests: [not_null]
+      - name: holdout_end
+        description: Last day of the holdout window, inclusive.
+        data_tests: [not_null]
+      - name: duration_holdout
+        description: Length of the holdout window in days, for scoring rate-based predictions.
+        data_tests: [not_null]
+
+  - name: int_customers__purchase_occasions
+    description: >
+      One row per customer per day on which they purchased. The grain every frequency metric in the
+      project is built from.
+    columns:
+      - name: occasion_id
+        description: source + customer + date. Unique by definition of the grain.
+        data_tests: [not_null, unique]
+      - name: customer_id
+        data_tests: [not_null]
+      - name: order_date
+        data_tests: [not_null]
+      - name: gross_amount
+        description: Total spent by this customer on this day, across all their line items.
+        data_tests: [not_null]
+      - name: line_items
+        description: How many source rows collapsed into this occasion. 1 for most, more for 1,774.
+        data_tests: [not_null]
+
+  - name: int_customers__rfm_calibration
+    description: >
+      BG/NBD and Gamma-Gamma inputs per customer, computed strictly within the calibration window.
+      This is what Phase 3 fits on.
+    columns:
+      # Uniqueness is per (source, customer_id), not customer_id alone -- customer numbering is only
+      # unique within a dataset. A bare `unique` test here would pass today and start failing the
+      # moment Phase 7 lands, so it is a singular test instead: assert_one_customer_row_per_source.
+      - name: customer_id
+        data_tests: [not_null]
+      - name: frequency
+        description: >
+          Repeat purchase occasions, i.e. occasions minus one. Zero for one-time buyers.
+        data_tests: [not_null]
+      - name: recency
+        description: >
+          Days between first and last occasion (the customer's age at last purchase). NOT
+          days-since-last-purchase.
+        data_tests: [not_null]
+      - name: customer_age
+        description: Days from first occasion to the window end. "T" in Fader & Hardie notation.
+        data_tests: [not_null]
+      - name: monetary_value
+        description: >
+          Mean spend across repeat occasions, excluding the first purchase, per the Gamma-Gamma
+          convention. Zero for one-time buyers.
+        data_tests: [not_null]
+      - name: is_gamma_gamma_eligible
+        description: >
+          Has at least one repeat purchase and strictly positive repeat spend. False for the ~60% of
+          CDNOW customers who bought once and for the 68 whose entire history is $0.00 giveaways.
+        data_tests: [not_null]
+      - name: source
+        data_tests: [not_null]
+
+  - name: int_customers__rfm_full
+    description: >
+      The same summary over calibration plus holdout. For Phase 4 comparison and for describing real
+      customer lifetimes in the marts. Never a model input.
+    columns:
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('int_customers__rfm_calibration')
+                field: customer_id
+      - name: frequency
+        data_tests: [not_null]
+      - name: customer_age
+        data_tests: [not_null]
+
+  - name: int_customers__holdout_actuals
+    description: >
+      Actual holdout-window behaviour per customer, including zeros for those who never returned.
+      The ground truth Phase 4 scores predictions against.
+    columns:
+      - name: customer_id
+        data_tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('int_customers__rfm_calibration')
+                field: customer_id
+      - name: holdout_frequency
+        description: >
+          ALL occasions in the holdout window, not occasions-minus-one. Deliberately asymmetric with
+          calibration frequency; see the model for why.
+        data_tests: [not_null]
+      - name: holdout_spend
+        data_tests: [not_null]
+
+  - name: int_cohorts__monthly_retention
+    description: >
+      Acquisition-cohort retention by month. Three cohorts on CDNOW, which is a property of the
+      dataset rather than of this model.
+    columns:
+      - name: cohort_month
+        data_tests: [not_null]
+      - name: months_since_first
+        data_tests: [not_null]
+      - name: cohort_size
+        data_tests: [not_null]
+      - name: active_customers
+        data_tests: [not_null]
+      - name: retention_rate
+        data_tests: [not_null]
