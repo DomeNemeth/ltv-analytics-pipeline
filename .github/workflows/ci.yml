@@ -30,5 +30,22 @@ jobs:
           uv run ruff check .
           uv run ruff format --check .
 
+      # Source data is fetched, not committed. Cache it on its pinned checksum so CI does not hammer
+      # a personal academic web server on every push, and so a transient outage there does not fail
+      # an unrelated build.
+      # Keyed on the file that holds the pinned checksum, so bumping the pin invalidates the cache
+      # automatically. Hardcoding the checksum here instead would leave CI restoring a stale file
+      # that then fails verification on every run, with no way for the runner to clear it.
+      - name: Cache source data
+        uses: actions/cache@v4
+        with:
+          path: data/raw
+          key: cdnow-${{ hashFiles('src/ltv/ingest/cdnow.py') }}
+
+      - name: Ingest source data
+        run: uv run ltv ingest cdnow
+
+      # Runs the integration tests too, since the data is now present. Those assert the documented
+      # row and customer counts, so a silently truncated download fails the build.
       - name: Test
         run: uv run pytest

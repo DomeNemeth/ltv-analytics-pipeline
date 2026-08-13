@@ -10,6 +10,8 @@ import typer
 
 from ltv import __version__
 from ltv.config import get_settings
+from ltv.ingest.cdnow import CDNOW_MASTER, CDNOWFormatError, ingest_cdnow
+from ltv.ingest.fetch import SourceDataError
 
 app = typer.Typer(
     name="ltv",
@@ -17,6 +19,12 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+
+ingest_app = typer.Typer(
+    help="Load source data into the warehouse `raw` schema.",
+    no_args_is_help=True,
+)
+app.add_typer(ingest_app, name="ingest")
 
 
 @app.callback()
@@ -42,6 +50,28 @@ def info() -> None:
     typer.echo(f"  raw data          {settings.raw_dir}")
     typer.echo(f"  reports           {settings.reports_dir}")
     typer.echo(f"  calibration split {settings.calibration_weeks}w / {settings.holdout_weeks}w")
+
+
+@ingest_app.command("cdnow")
+def ingest_cdnow_command(
+    force_download: bool = typer.Option(
+        False, "--force-download", help="Re-download the source archive even if cached."
+    ),
+) -> None:
+    """Load the CDNOW master dataset into raw.cdnow_transactions."""
+    try:
+        result = ingest_cdnow(get_settings(), force_download=force_download)
+    except (SourceDataError, CDNOWFormatError) as exc:
+        # Both carry messages written to be acted on. Showing them inside a Python traceback would
+        # bury the one useful line under twenty useless ones.
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    typer.echo(f"loaded {result.table}")
+    typer.echo(f"  source     {result.source_file}")
+    typer.echo(f"  rows       {result.rows:,}")
+    typer.echo(f"  customers  {result.customers:,}")
+    typer.echo(f"  data from  {CDNOW_MASTER.citation}")
 
 
 if __name__ == "__main__":

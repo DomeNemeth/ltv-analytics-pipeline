@@ -36,7 +36,8 @@ Everything runs through `uv`; there is no `make` on the development host.
 ```bash
 uv sync                       # install the locked environment
 uv run ltv info               # show resolved config and whether the warehouse is built
-uv run pytest                 # Python tests
+uv run ltv ingest cdnow       # download (checksum-pinned), parse, load raw.cdnow_transactions
+uv run pytest                 # Python tests; integration tests skip if source data is absent
 uv run ruff check . && uv run ruff format --check .
 ```
 
@@ -53,8 +54,14 @@ These are real, already-diagnosed, and will waste hours if rediscovered from scr
     succeeds. Note `UV_NATIVE_TLS` is the deprecated spelling as of uv 0.12.
   - `NODE_EXTRA_CA_CERTS=<local path>` (user env var), additive
     insurance for when Evidence pulls native binaries. npm itself works without it.
+  - `httpx` hit the same wall. Fixed properly in code, not by an env var: `src/ltv/ingest/fetch.py`
+    builds its SSL context with `truststore`, so verification uses the OS trust store. Verification
+    is never disabled — `verify=False` is banned in this repo.
 - **`uv sync` occasionally fails with `os error 5 / access denied`** on a cache rename. That is
   on-access virus scanning holding the temp file. It is transient — just re-run.
+- **brucehardie.com rejects the default `python-httpx` user agent** with a non-standard HTTP 465.
+  The fetcher sends an honest self-identifying agent naming the project and its repo. Do not change
+  this to impersonate a browser.
 - **No C compiler on the host** (no MSVC Build Tools, no mingw). PyTensor reports `g++ not detected`
   and `config.cxx == ''`, falling back to its slow Python backend. Hence `numba` + `nutpie`:
   both are prebuilt wheels needing no compiler and no admin. Verified working — nutpie NUTS recovers
@@ -117,10 +124,22 @@ Kept current. This section is what makes the repo credible — it must never ove
 - Single locked environment resolves dbt-core 1.12, Prefect 3.8.2, and PyMC-Marketing 0.19.4
   together — 195 packages, no conflicts.
 - nutpie/numba sampling works on the compiler-less host.
-- `ltv info` runs; config tests pass.
+- `ltv ingest cdnow` loads **69,659 rows / 23,570 customers** into `raw.cdnow_transactions`, matching
+  the counts published in the dataset's own read_me. Asserted by tests, and run in CI.
+- Strict fixed-width parsing: field boundaries derived empirically (blank on all 69,659 lines at
+  columns 0, 6, 15, 18), and any width, separator, encoding, or numeric deviation raises with the
+  offending line number.
+- Tests pass: the fast suite runs offline with no source data; the integration tests additionally
+  require the downloaded file and are the ones asserting the row/customer counts. On a clean clone
+  the integration tests skip — except in CI, where a skip is turned into a failure so a missing
+  download can never leave the build green.
 
-**Not built yet:** ingestion, dbt project, model fitting, validation, dashboard, Prefect flow,
-Docker, CI beyond lint+test, second data source, published URL.
+**Known about the CDNOW master data, unresolved by design until staging:** 255 byte-identical
+duplicate rows, 80 rows with `$0.00`, and 1,774 customer-days holding more than one row (collapsing
+to purchase occasions removes 2,068 rows, 3.0%). All are preserved verbatim in `raw`.
+
+**Not built yet:** dbt project, model fitting, validation, dashboard, Prefect flow, Docker, second
+data source, published URL.
 
 **Deliberate non-goals:** streaming/incremental loads, a warehouse other than DuckDB, multi-tenant
 or scheduled production operation, margin-based LTV, customer-level PII handling (the datasets have none).

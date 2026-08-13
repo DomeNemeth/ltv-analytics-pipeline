@@ -24,6 +24,7 @@ dependencies = [
     "typer>=0.12",
     "httpx>=0.27",
     "matplotlib>=3.9",
+    "truststore>=0.10.4",
 ]
 
 [project.scripts]
@@ -53,3 +54,6 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "integration: needs real source data on disk; skipped on a clean clone, run in CI after ingest",
+]
