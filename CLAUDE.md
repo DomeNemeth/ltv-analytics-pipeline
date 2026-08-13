@@ -17,7 +17,7 @@ metrics and explicit assumption checks. Fitting is not predicting.
 | Warehouse | DuckDB | Zero infra, single file, Evidence reads it natively. BigQuery would add cloud setup and cost for a dataset that fits in memory. |
 | Transformation | dbt-duckdb | Layered SQL with tests and lineage. |
 | CLV model | PyMC-Marketing | `lifetimes` is unmaintained; PyMC-Marketing is its designated successor and gives posterior uncertainty, not just point estimates. |
-| Sampling | nutpie + numba | The development host has **no C compiler**, so PyTensor cannot use its C backend. See §4. |
+| Sampling | nutpie + numba | Prebuilt wheels, so the project builds and samples **without a C compiler**. See §4. |
 | Orchestration | Prefect | Earns its place for exactly one reason: the pipeline is `dbt → Python → dbt` (RFM features feed the model fit, whose predictions feed the marts). That handoff is awkward in pure dbt. |
 | Dashboard | Evidence.dev | Builds a static site, so it publishes free to GitHub Pages. Streamlit would need a running server. |
 | Packaging | uv | Fast, lockfile-based, pins the interpreter. |
@@ -31,7 +31,8 @@ budget here goes to modelling and validation.
 
 ## 3. Commands
 
-Everything runs through `uv`; there is no `make` on the development host.
+Everything runs through `uv`. There is no Makefile — commands must work identically on Windows,
+macOS, and Linux.
 
 ```bash
 uv sync                       # install the locked environment
@@ -44,36 +45,35 @@ uv run ruff check . && uv run ruff format --check .
 Commands are added to the CLI as each stage lands, so `uv run ltv --help` always reflects what the
 repo can actually do. It never advertises stubs.
 
-## 4. Environment gotchas (development host specific, not in the repo's public docs)
+## 4. Environment notes
 
-These are real, already-diagnosed, and will waste hours if rediscovered from scratch.
+Portable constraints and the reasoning behind them. Two are worth understanding before changing
+anything, because both shaped dependency choices that otherwise look arbitrary.
 
-- **Some endpoint security products intercept TLS.** Tools that ship their own CA bundle fail with `invalid peer certificate:
-  UnknownIssuer`. Fixes in place:
-  - `UV_SYSTEM_CERTS=1` (user env var). Verified: without it uv cannot reach PyPI, with it resolution
-    succeeds. Note `UV_NATIVE_TLS` is the deprecated spelling as of uv 0.12.
-  - `NODE_EXTRA_CA_CERTS=<local path>` (user env var), additive
-    insurance for when Evidence pulls native binaries. npm itself works without it.
-  - `httpx` hit the same wall. Fixed properly in code, not by an env var: `src/ltv/ingest/fetch.py`
-    builds its SSL context with `truststore`, so verification uses the OS trust store. Verification
-    is never disabled — `verify=False` is banned in this repo.
-- **`uv sync` occasionally fails with `os error 5 / access denied`** on a cache rename. That is
-  on-access virus scanning holding the temp file. It is transient — just re-run.
-- **brucehardie.com rejects the default `python-httpx` user agent** with a non-standard HTTP 465.
-  The fetcher sends an honest self-identifying agent naming the project and its repo. Do not change
-  this to impersonate a browser.
-- **No C compiler on the host** (no MSVC Build Tools, no mingw). PyTensor reports `g++ not detected`
-  and `config.cxx == ''`, falling back to its slow Python backend. Hence `numba` + `nutpie`:
-  both are prebuilt wheels needing no compiler and no admin. Verified working — nutpie NUTS recovers
-  a known mean correctly in ~9s. Set `PYTENSOR_FLAGS=cxx=` to silence the warning.
-  Docker/CI run on Linux with gcc present, which also proves the pipeline is backend-portable.
-- **Toolchain is installed per-user, no admin**, via direct downloads (system package managers were unavailable
-  by the same TLS problem): Python 3.12.10 (`py -3.12`), Node 22 LTS at
-  `<local path>` (portable zip, not the MSI — the MSI needs admin), uv
-  at `<local path>`.
-- **Node 22 LTS, not Node 24**, deliberately. Evidence pulls native DuckDB bindings, and with no
-  compiler available a prebuilt binary must exist for the Node ABI. Node 22 has far better prebuild
-  coverage than 24.
+- **TLS-intercepting middleboxes.** Corporate proxies and some endpoint-security products present
+  certificates signed by a locally-installed root. Tools that ship their own CA bundle then fail with
+  `invalid peer certificate: UnknownIssuer`, even though the machine trusts the certificate.
+  - Python: handled in code. `src/ltv/ingest/fetch.py` builds its SSL context with `truststore`, so
+    verification uses the OS trust store. **Verification is never disabled — `verify=False` is banned
+    in this repo.**
+  - uv: set `UV_SYSTEM_CERTS=1` (`UV_NATIVE_TLS` is the deprecated spelling as of uv 0.12).
+  - Node: set `NODE_EXTRA_CA_CERTS` to a PEM of your system roots if Evidence fails to fetch native
+    binaries. npm generally works without it.
+  - If `uv sync` fails with `os error 5 / access denied` on a cache rename, that is on-access
+    virus scanning holding the temp file. It is transient — re-run.
+- **The project must build without a C compiler.** PyTensor compiles model graphs to C and falls back
+  to a much slower pure-Python backend when no compiler is present (`config.cxx == ''`, plus a
+  `g++ not detected` warning). `numba` and `nutpie` are therefore pinned: both are prebuilt wheels
+  needing no compiler and no admin rights, and nutpie gives a fast NUTS sampler regardless. Linux CI
+  and the Docker image *do* have gcc, so the pipeline is exercised on both backends — which is a
+  portability guarantee, not just a workaround. Set `PYTENSOR_FLAGS=cxx=` to silence the warning.
+- **Node 22 LTS, not Node 24**, deliberately. Evidence pulls native DuckDB bindings, and where no
+  compiler is available a prebuilt binary must exist for the Node ABI. Node 22 has far better
+  prebuild coverage than 24.
+- **brucehardie.com rejects the default `python-httpx` user agent** with a non-standard HTTP 465. The
+  fetcher sends an honest self-identifying agent naming the project and its repo. Do not change this
+  to impersonate a browser.
+- **`make` is not assumed.** Every documented command is a plain `uv run ...` invocation.
 
 ## 5. Conventions
 

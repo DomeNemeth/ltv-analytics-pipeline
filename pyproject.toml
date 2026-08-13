@@ -14,7 +14,7 @@ dependencies = [
     "dbt-duckdb>=1.9",
     # probabilistic CLV modelling
     "pymc-marketing>=0.10",
-    # PyTensor backends that need no C compiler (see CLAUDE.md: no compiler on the development host)
+    # PyTensor backends that need no C compiler (see CLAUDE.md section 4)
     "numba>=0.60",
     "nutpie>=0.13",
     # orchestration
