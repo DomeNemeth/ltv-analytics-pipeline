@@ -137,15 +137,19 @@ Kept current. This section is what makes the repo credible — it must never ove
   `--force-download` wiring are each **mutation-verified**: the logic was removed and the
   corresponding test confirmed to fail.
 
-**Written but never executed:** `.github/workflows/ci.yml`. There is no git remote yet, so CI has
-never run even once. Do not describe the build as passing until it has actually run.
+- **CI is green and genuinely exercised.** First run on 2026-08-13 executed the real ingest on Linux
+  (69,659 / 23,570) and reported `49 passed` — not 43 passed with 6 skipped, confirming the
+  integration tests actually ran rather than silently skipping. This also proves the pipeline works
+  on PyTensor's C backend, not only the numba one used locally.
+- Published at https://github.com/DomeNemeth/ltv-analytics-pipeline. `main` requires the `test` check
+  to pass; `enforce_admins` is off, so the owner can still push directly.
 
 **Known about the CDNOW master data, unresolved by design until staging:** 255 byte-identical
 duplicate rows, 80 rows with `$0.00`, and 1,774 customer-days holding more than one row (collapsing
 to purchase occasions removes 2,068 rows, 3.0%). All are preserved verbatim in `raw`.
 
 **Not built yet:** dbt project, model fitting, validation, dashboard, Prefect flow, Docker, second
-data source, GitHub remote, published URL.
+data source, published dashboard URL.
 
 **Deliberate non-goals:** streaming/incremental loads, a warehouse other than DuckDB, multi-tenant
 or scheduled production operation, margin-based LTV, customer-level PII handling (the datasets have none).
