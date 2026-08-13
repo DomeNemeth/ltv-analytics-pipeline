@@ -13,10 +13,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v5
+        uses: astral-sh/setup-uv@v7
         with:
           enable-cache: true
 
@@ -37,13 +37,20 @@ jobs:
       # automatically. Hardcoding the checksum here instead would leave CI restoring a stale file
       # that then fails verification on every run, with no way for the runner to clear it.
       - name: Cache source data
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: data/raw
           key: cdnow-${{ hashFiles('src/ltv/ingest/cdnow.py') }}
 
       - name: Ingest source data
         run: uv run ltv ingest cdnow
+
+      # Runs the dbt models and every dbt test. Separate from pytest even though the integration
+      # tests build their own warehouse, because this is the command the README tells a reader to
+      # run -- if it breaks, the documented workflow is broken, and asserting on a warehouse that
+      # only pytest knows how to build would not notice.
+      - name: Transform
+        run: uv run ltv transform
 
       # Runs the integration tests too, since the data is now present. Those assert the documented
       # row and customer counts, so a silently truncated download fails the build.
