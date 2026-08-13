@@ -125,21 +125,27 @@ Kept current. This section is what makes the repo credible — it must never ove
   together — 195 packages, no conflicts.
 - nutpie/numba sampling works on the compiler-less host.
 - `ltv ingest cdnow` loads **69,659 rows / 23,570 customers** into `raw.cdnow_transactions`, matching
-  the counts published in the dataset's own read_me. Asserted by tests, and run in CI.
+  the counts published in the dataset's own read_me. Asserted by tests, verified locally.
 - Strict fixed-width parsing: field boundaries derived empirically (blank on all 69,659 lines at
   columns 0, 6, 15, 18), and any width, separator, encoding, or numeric deviation raises with the
   offending line number.
-- Tests pass: the fast suite runs offline with no source data; the integration tests additionally
-  require the downloaded file and are the ones asserting the row/customer counts. On a clean clone
-  the integration tests skip — except in CI, where a skip is turned into a failure so a missing
-  download can never leave the build green.
+- 49 tests pass locally. The fast suite (43) runs offline with no source data; the 6 integration
+  tests additionally require the downloaded file and are the ones asserting the row/customer counts.
+  On a clean clone the integration tests skip — except when `CI` is set, where a skip is escalated to
+  a failure so a missing download can never leave a build green.
+- The checksum pin, the atomic cache write, the read-only connection guard, and the
+  `--force-download` wiring are each **mutation-verified**: the logic was removed and the
+  corresponding test confirmed to fail.
+
+**Written but never executed:** `.github/workflows/ci.yml`. There is no git remote yet, so CI has
+never run even once. Do not describe the build as passing until it has actually run.
 
 **Known about the CDNOW master data, unresolved by design until staging:** 255 byte-identical
 duplicate rows, 80 rows with `$0.00`, and 1,774 customer-days holding more than one row (collapsing
 to purchase occasions removes 2,068 rows, 3.0%). All are preserved verbatim in `raw`.
 
 **Not built yet:** dbt project, model fitting, validation, dashboard, Prefect flow, Docker, second
-data source, published URL.
+data source, GitHub remote, published URL.
 
 **Deliberate non-goals:** streaming/incremental loads, a warehouse other than DuckDB, multi-tenant
 or scheduled production operation, margin-based LTV, customer-level PII handling (the datasets have none).
@@ -155,3 +161,14 @@ or already-in-context work; do it inline and say the subagent was skipped and wh
   calibration/holdout split, metric choice, and feature leakage. Must sign off before any results
   claim enters the README.
 - `repo-reviewer` — pre-commit diff review against portfolio standards.
+
+**Ask reviewers to verify by mutation, not by reading.** The Phase 1 review found three tests that
+passed whether or not the code under test was correct — a `.partial`-file assertion satisfied by code
+that never staged one, a read-only guard whose test short-circuited before reaching it, and a
+`--force-download` seam tested at both ends but not in the middle. Reading the code found none of
+them; deleting the logic and re-running the test found all three. A test that cannot fail is worse
+than no test, because it buys false confidence. `scripts/` has no mutation harness yet — the Phase 1
+one was throwaway; write one if this becomes routine.
+
+**Gotcha:** agents in `.claude/agents/` are loaded at session start. One created mid-session cannot be
+invoked by name until the next session; until then, use a general-purpose agent with the brief inlined.
