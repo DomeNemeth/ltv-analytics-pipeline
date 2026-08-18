@@ -167,7 +167,7 @@ Kept current. This section is what makes the repo credible — it must never ove
 - 65 tests pass locally. The fast suite runs offline with no source data; the integration tests
   additionally require the downloaded file. On a clean clone they skip — except when `CI` is set,
   where a skip is escalated to a failure so a missing download can never leave a build green.
-- `ltv transform` builds **8 dbt models and 62 dbt tests**, all passing.
+- `ltv transform` builds **8 dbt models and 66 dbt tests**, all passing.
 - The occasion collapse works and reconciles: 69,659 line items become **67,591 occasions**
   (2,068 absorbed, 3.0%), and calibration (47,907) plus holdout (19,684) sums back to exactly 67,591.
 - The window derivation lands on the canonical Fader & Hardie split with no rounding —
@@ -179,15 +179,33 @@ Kept current. This section is what makes the repo credible — it must never ove
   covering the collapse at all.
 - Calibration population: 23,570 customers, **14,119 one-time buyers** (~60%, consistent with the
   published CDNOW figures) and **16,512 who never returned in the holdout window**.
-- Mutation-verified, Phase 1 and Phase 2 together: the checksum pin, the atomic cache write, the
-  read-only connection guard, the `--force-download` wiring, the occasion grain, the lossless
-  collapse, the leakage guard, the Gamma-Gamma monetary definition, the window off-by-one, and the
-  dbt connection release. Each was broken deliberately and the corresponding check confirmed to fail.
+- Mutation-verified, Phase 1 and Phase 2 together: **10/10 mutations caught.** The checksum pin, the
+  atomic cache write, the read-only connection guard, the `--force-download` wiring, the occasion
+  grain, the lossless collapse, the leakage guard, the Gamma-Gamma monetary numerator *and*
+  denominator, the window off-by-one, the holdout population, the holdout spend, the occasion
+  amount, and the dbt connection release. Each was broken deliberately and the corresponding check
+  confirmed to fail.
+
+- **A whole-layer `dbt-modeler` review found five blocking defects, all in the tests rather than the
+  models.** It verified the layer by independently recomputing all four RFM quantities for every one
+  of the 23,570 customers straight from `raw` with separately-written SQL — 0 mismatches — and then
+  found that the suite guarding them had holes. The worst: turning the `left join` in
+  `int_customers__holdout_actuals` into an `inner join` drops the population from 23,570 to 7,058,
+  removing precisely the customers the model predicts worst, and **passed all 62 tests**. A
+  `relationships` test appeared to guard it but could not fail, because the model selects its
+  `customer_id` out of the very model it was checked against. Also unguarded: holdout money entirely
+  (`holdout_monetary_value` had no test and no description), the collapse in dollars as opposed to
+  rows, and the `monetary_value` denominator. All four now have tests, and all four are in the
+  mutation harness. See the four `assert_*` tests added in the same commit.
 
 - **CI is green and genuinely exercised.** First run on 2026-08-13 executed the real ingest on Linux
   (69,659 / 23,570) and reported `49 passed` — not 43 passed with 6 skipped, confirming the
   integration tests actually ran rather than silently skipping. This also proves the pipeline works
-  on PyTensor's C backend, not only the numba one used locally.
+  on PyTensor's C backend, not only the numba one used locally. Re-confirmed on the Phase 2 branch
+  on 2026-08-18: `PASS=74` from dbt and `65 passed` from pytest, again with no skips. Note that CI
+  triggers on `push: branches: [main]` and `pull_request` only, so a feature branch is exercised
+  when its PR opens, not when it is pushed — a branch can sit for days looking untested because it
+  genuinely is.
 - Published at https://github.com/DomeNemeth/ltv-analytics-pipeline. `main` requires the `test` check
   to pass; `enforce_admins` is off, so the owner can still push directly.
 
@@ -231,10 +249,21 @@ than no test, because it buys false confidence.
 
 `scripts/mutation_check.py` is now the harness for this, added in Phase 2 once it was clear the need
 was recurring. It applies one deliberate defect at a time, runs `ltv transform` and `pytest`,
-restores the file, and reports which guard noticed. Add a mutation whenever a test claims to protect
-something load-bearing. Running it corrected a belief that reading could not have: the
-weakened-occasion-grain mutation is caught by the `unique` test on `occasion_id`, **not** by
-`assert_occasions_collapsed`, which needed its own mutation to prove it can fail at all.
+restores the file, and reports which guard noticed. **10 mutations, 10 caught.** Add a mutation
+whenever a test claims to protect something load-bearing. Running it corrected a belief that reading
+could not have: the weakened-occasion-grain mutation is caught by the `unique` test on
+`occasion_id`, **not** by `assert_occasions_collapsed`, which needed its own mutation to prove it
+can fail at all.
+
+**The Phase 2 review sharpened the lesson: look hardest at the tests on the models you trust most.**
+All five blocking findings were defects in the test suite, not in the SQL — the models recomputed
+correctly for all 23,570 customers under independent arithmetic. The pattern worth internalising is
+that a test asserting a property the model *establishes by construction* cannot fail. The
+`relationships` test on `int_customers__holdout_actuals` checked an id that the model selects out of
+the very relation it was checked against. When reviewing a test, ask what would have to change for
+it to go red, and if the answer is "nothing reachable", it is decorative. A second pattern from the
+same pass: a test that joins with `inner join` cannot notice missing rows, because the rows that
+would fail it are the rows the join already dropped.
 
 **Gotcha:** agents in `.claude/agents/` are loaded at session start, **from the working directory the
 session was started in**. Opening a session in the parent folder rather than the repo means the
