@@ -38,12 +38,26 @@ macOS, and Linux.
 uv sync                       # install the locked environment
 uv run ltv info               # show resolved config and whether the warehouse is built
 uv run ltv ingest cdnow       # download (checksum-pinned), parse, load raw.cdnow_transactions
+uv run ltv transform          # dbt build: all models plus every dbt test
 uv run pytest                 # Python tests; integration tests skip if source data is absent
 uv run ruff check . && uv run ruff format --check .
+
+uv run python scripts/mutation_check.py    # prove the guards can actually fail
 ```
 
 Commands are added to the CLI as each stage lands, so `uv run ltv --help` always reflects what the
 repo can actually do. It never advertises stubs.
+
+**`ltv transform` is the only supported way to run dbt.** It passes anything after it straight
+through, so `uv run ltv transform --select staging` and `uv run ltv transform test` both work. It
+exists rather than a shell wrapper because it must behave identically on all three platforms and
+because Phase 6's Prefect flow needs a Python entry point regardless. Calling `dbt` directly needs
+`LTV_DUCKDB_PATH` exported and `--project-dir`/`--profiles-dir` pointed at `dbt/`, which is exactly
+the plumbing this command exists to remove.
+
+**dbt runs in-process, not as a subprocess.** That is what lets `profiles.yml` read configuration
+from `Settings` through `env_var()`, but it also means dbt's DuckDB handle must be released when it
+finishes or the next stage cannot open the warehouse. `transform.py` does this; do not remove it.
 
 ## 4. Environment notes
 
@@ -89,6 +103,11 @@ anything, because both shaped dependency choices that otherwise look arbitrary.
 - **The staging contract.** Every `stg_*__transactions` model emits exactly:
   `source, customer_id, order_id, order_date, quantity, unit_price, gross_amount, is_return`.
   This is what makes adding a second source a config change rather than a rewrite.
+- **Uniqueness is per `(source, customer_id)`, never `customer_id` alone.** Customer numbering is
+  only unique within a dataset. A bare `unique` test on `customer_id` passes today and starts
+  failing the moment a second source lands, so per-customer grain is asserted with a singular test.
+- **No `dbt_utils`.** Every test this project needs is a few lines of plain SQL, and a readable
+  singular test is better evidence of understanding than a macro call.
 - Conventional commits, small and focused.
 - Tests are real tests. A test that asserts `True` is worse than no test.
 
@@ -100,6 +119,22 @@ These exist because getting them wrong produces a model that looks excellent and
   reference a date after the cutoff. Leakage here silently inflates every metric.
 - **BG/NBD counts purchase occasions, not line items.** Same-day transactions for one customer collapse
   to a single occasion in the intermediate layer. Skipping this inflates frequency and flatters the model.
+- **The four RFM quantities mean specific things, and three of them are commonly stated wrong.**
+  These are implemented once, in `dbt/macros/rfm_summary.sql`:
+  - `frequency` — **repeat** occasions, i.e. occasions minus one. A customer who bought once has 0.
+  - `recency` — days between first and last occasion (age *at* last purchase). **Not**
+    days-since-last-purchase, which is what marketing RFM means by the word; the two run in
+    opposite directions.
+  - `customer_age` — days from first occasion to the window end. "T" in Fader & Hardie notation,
+    spelled out because DuckDB folds unquoted identifiers to lowercase.
+  - `monetary_value` — mean spend over **repeat** occasions only, excluding the first purchase.
+    That is the Gamma-Gamma convention; including the first purchase biases the estimate.
+- **Holdout frequency counts every occasion, unlike calibration frequency.** The asymmetry is
+  deliberate: the model predicts how many purchases come next — all of them, not all-but-one.
+  Scoring a repeat count against a total count understates error by one purchase per active customer.
+- **Ineligible customers are flagged, never filtered.** One-time buyers and zero-spend customers
+  carry no Gamma-Gamma information, but they have valid BG/NBD frequencies and belong in customer
+  counts. `is_gamma_gamma_eligible` marks them; the fit excludes them and reports how many.
 - **MAP is the default fit** so the pipeline stays fast and CI stays honest. Any claim about
   *uncertainty intervals* must come from a `--full-bayes` (NUTS) run, not from MAP.
 - **Report error against a naive baseline.** "The model beat nothing" is not a result.
@@ -129,13 +164,25 @@ Kept current. This section is what makes the repo credible — it must never ove
 - Strict fixed-width parsing: field boundaries derived empirically (blank on all 69,659 lines at
   columns 0, 6, 15, 18), and any width, separator, encoding, or numeric deviation raises with the
   offending line number.
-- 49 tests pass locally. The fast suite (43) runs offline with no source data; the 6 integration
-  tests additionally require the downloaded file and are the ones asserting the row/customer counts.
-  On a clean clone the integration tests skip — except when `CI` is set, where a skip is escalated to
-  a failure so a missing download can never leave a build green.
-- The checksum pin, the atomic cache write, the read-only connection guard, and the
-  `--force-download` wiring are each **mutation-verified**: the logic was removed and the
-  corresponding test confirmed to fail.
+- 65 tests pass locally. The fast suite runs offline with no source data; the integration tests
+  additionally require the downloaded file. On a clean clone they skip — except when `CI` is set,
+  where a skip is escalated to a failure so a missing download can never leave a build green.
+- `ltv transform` builds **8 dbt models and 62 dbt tests**, all passing.
+- The occasion collapse works and reconciles: 69,659 line items become **67,591 occasions**
+  (2,068 absorbed, 3.0%), and calibration (47,907) plus holdout (19,684) sums back to exactly 67,591.
+- The window derivation lands on the canonical Fader & Hardie split with no rounding —
+  calibration 1997-01-01…1997-09-30, holdout 1997-10-01…1998-06-30 — and is pinned by a test.
+- RFM output matches values hand-computed in pandas, by independent logic, for three customers
+  chosen to cover a one-time buyer, a mid-frequency buyer with a three-line day, and a heavy buyer
+  with an eight-line day. A further test guards the *premise*: it fails if the sampled customers
+  ever stop including multi-line-item days, which would leave the assertions passing while no longer
+  covering the collapse at all.
+- Calibration population: 23,570 customers, **14,119 one-time buyers** (~60%, consistent with the
+  published CDNOW figures) and **16,512 who never returned in the holdout window**.
+- Mutation-verified, Phase 1 and Phase 2 together: the checksum pin, the atomic cache write, the
+  read-only connection guard, the `--force-download` wiring, the occasion grain, the lossless
+  collapse, the leakage guard, the Gamma-Gamma monetary definition, the window off-by-one, and the
+  dbt connection release. Each was broken deliberately and the corresponding check confirmed to fail.
 
 - **CI is green and genuinely exercised.** First run on 2026-08-13 executed the real ingest on Linux
   (69,659 / 23,570) and reported `49 passed` — not 43 passed with 6 skipped, confirming the
@@ -144,12 +191,21 @@ Kept current. This section is what makes the repo credible — it must never ove
 - Published at https://github.com/DomeNemeth/ltv-analytics-pipeline. `main` requires the `test` check
   to pass; `enforce_admins` is off, so the owner can still push directly.
 
-**Known about the CDNOW master data, unresolved by design until staging:** 255 byte-identical
-duplicate rows, 80 rows with `$0.00`, and 1,774 customer-days holding more than one row (collapsing
-to purchase occasions removes 2,068 rows, 3.0%). All are preserved verbatim in `raw`.
+**Known about the CDNOW master data, and what the layer does with it:** 255 byte-identical duplicate
+rows and 80 `$0.00` rows are preserved verbatim in `raw` and deliberately **kept** through staging —
+the file records line items with no order identifier, so duplicates are not provably artifacts, and
+dropping them would understate spend by $4,332 across 164 customers. A test pins the count of 255 so
+the decision gets revisited rather than silently reapplied if the source changes.
 
-**Not built yet:** dbt project, model fitting, validation, dashboard, Prefect flow, Docker, second
-data source, published dashboard URL.
+All 80 zero-value rows turn out to be **standalone occasions** — not one shares a day with a paid
+purchase, so summing cannot rescue them. In the calibration window this leaves 14,120 customers
+Gamma-Gamma-ineligible: 14,119 one-time buyers plus exactly **one** repeat buyer whose repeat spend
+is zero. Worth stating plainly because the earlier estimate was wrong: the "68 zero-spend customers"
+are almost all one-time buyers who were already excluded on that ground, so the zero-value rows cost
+one additional customer, not 68.
+
+**Not built yet:** model fitting, validation, marts, dashboard, Prefect flow, Docker, second data
+source, published dashboard URL.
 
 **Deliberate non-goals:** streaming/incremental loads, a warehouse other than DuckDB, multi-tenant
 or scheduled production operation, margin-based LTV, customer-level PII handling (the datasets have none).
@@ -171,8 +227,16 @@ passed whether or not the code under test was correct — a `.partial`-file asse
 that never staged one, a read-only guard whose test short-circuited before reaching it, and a
 `--force-download` seam tested at both ends but not in the middle. Reading the code found none of
 them; deleting the logic and re-running the test found all three. A test that cannot fail is worse
-than no test, because it buys false confidence. `scripts/` has no mutation harness yet — the Phase 1
-one was throwaway; write one if this becomes routine.
+than no test, because it buys false confidence.
 
-**Gotcha:** agents in `.claude/agents/` are loaded at session start. One created mid-session cannot be
-invoked by name until the next session; until then, use a general-purpose agent with the brief inlined.
+`scripts/mutation_check.py` is now the harness for this, added in Phase 2 once it was clear the need
+was recurring. It applies one deliberate defect at a time, runs `ltv transform` and `pytest`,
+restores the file, and reports which guard noticed. Add a mutation whenever a test claims to protect
+something load-bearing. Running it corrected a belief that reading could not have: the
+weakened-occasion-grain mutation is caught by the `unique` test on `occasion_id`, **not** by
+`assert_occasions_collapsed`, which needed its own mutation to prove it can fail at all.
+
+**Gotcha:** agents in `.claude/agents/` are loaded at session start, **from the working directory the
+session was started in**. Opening a session in the parent folder rather than the repo means the
+project's agents are not registered at all, and neither is a file created mid-session. In both cases,
+use a general-purpose agent with the brief inlined — that is what the Phase 2 review pass used.
