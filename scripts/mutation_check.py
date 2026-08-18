@@ -87,6 +87,47 @@ MUTATIONS = (
         new="            pass",
         guard="RFM math fixture (dbt keeps the warehouse handle open)",
     ),
+    # The four below were added after a whole-layer review, and every one of them was confirmed to
+    # survive the entire suite beforehand. They are not hypothetical: each is a one-word edit that
+    # produces valid SQL and plausible output, which is precisely the class of defect that reading
+    # does not catch.
+    Mutation(
+        name="holdout-population",
+        path="dbt/models/intermediate/int_customers__holdout_actuals.sql",
+        old="left join aggregated",
+        new="inner join aggregated",
+        # The worst of the four. This silently drops the 16,512 customers who never came back --
+        # 70% of the population, and specifically the ones the model is least able to predict, so
+        # every holdout metric improves sharply. It passed all 62 tests until
+        # assert_customer_populations_align existed.
+        guard="assert_customer_populations_align",
+    ),
+    Mutation(
+        name="holdout-spend",
+        path="dbt/models/intermediate/int_customers__holdout_actuals.sql",
+        old="        sum(gross_amount) as holdout_spend",
+        new="        sum(gross_amount) / 2 as holdout_spend",
+        guard="assert_spend_reconciles_across_windows",
+    ),
+    Mutation(
+        name="collapse-amount",
+        path="dbt/models/intermediate/int_customers__purchase_occasions.sql",
+        old="        sum(gross_amount) as gross_amount,",
+        new="        max(gross_amount) as gross_amount,",
+        # Counts reconcile perfectly under this mutation; only the money is wrong. It is the
+        # complement of collapse-lossless, which proves rows survive but says nothing about what
+        # they carried.
+        guard="assert_occasions_collapsed (amount reconciliation)",
+    ),
+    Mutation(
+        name="monetary-denominator",
+        path="dbt/macros/rfm_summary.sql",
+        old="(total_spend - first_occasion_spend) / frequency",
+        new="(total_spend - first_occasion_spend) / occasions",
+        # The companion to `monetary` above, which mutates the numerator. Phase 3 fits Gamma-Gamma
+        # on this column, so a wrong denominator corrupts the model rather than a report.
+        guard="assert_monetary_value_matches_repeat_spend",
+    ),
 )
 
 CHECKS = (

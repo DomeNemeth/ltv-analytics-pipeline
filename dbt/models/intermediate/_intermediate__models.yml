@@ -100,13 +100,13 @@ models:
       The same summary over calibration plus holdout. For Phase 4 comparison and for describing real
       customer lifetimes in the marts. Never a model input.
     columns:
+      # No `relationships` test back to rfm_calibration. dbt can only express that on a single
+      # column, and CLAUDE.md section 5 is explicit that a bare customer_id key passes today and
+      # starts meaning the wrong thing the moment a second source lands -- online_retail customer 5
+      # would satisfy it by matching cdnow customer 5. The assertion is real and worth keeping, so
+      # it moved to assert_customer_populations_align, which keys on (source, customer_id).
       - name: customer_id
-        data_tests:
-          - not_null
-          - relationships:
-              arguments:
-                to: ref('int_customers__rfm_calibration')
-                field: customer_id
+        data_tests: [not_null]
       - name: frequency
         data_tests: [not_null]
       - name: customer_age
@@ -117,19 +117,29 @@ models:
       Actual holdout-window behaviour per customer, including zeros for those who never returned.
       The ground truth Phase 4 scores predictions against.
     columns:
+      # The `relationships` test that used to sit here could not fail. This model *selects*
+      # customer_id out of int_customers__rfm_calibration, so the referenced set is a subset by
+      # construction and no reachable defect produces a violation -- it passed whether or not the
+      # model was correct, on the one model Phase 4 scores everything against. Replaced by
+      # assert_customer_populations_align, which asserts the populations are equal rather than
+      # merely nested, and keys on (source, customer_id).
       - name: customer_id
-        data_tests:
-          - not_null
-          - relationships:
-              arguments:
-                to: ref('int_customers__rfm_calibration')
-                field: customer_id
+        data_tests: [not_null]
       - name: holdout_frequency
         description: >
           ALL occasions in the holdout window, not occasions-minus-one. Deliberately asymmetric with
           calibration frequency; see the model for why.
         data_tests: [not_null]
       - name: holdout_spend
+        data_tests: [not_null]
+      - name: holdout_monetary_value
+        description: >
+          Mean spend per holdout occasion. What Phase 4 scores the Gamma-Gamma prediction against,
+          so it is guarded rather than merely emitted; see
+          assert_holdout_actuals_are_internally_consistent.
+        data_tests: [not_null]
+      - name: duration_holdout
+        description: Length of the holdout window in days, carried through for rate-based scoring.
         data_tests: [not_null]
 
   - name: int_cohorts__monthly_retention
