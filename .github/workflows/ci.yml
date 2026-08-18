@@ -52,6 +52,16 @@ jobs:
       - name: Transform
         run: uv run ltv transform
 
+      # Fits the models for the same reason the transform step exists: it is a command the README
+      # tells a reader to run, and the unit tests exercise it only on a small synthetic population.
+      # This is also the only place the fit runs on PyTensor's C backend -- the development host has
+      # no compiler -- so it is a portability check, not just a smoke test.
+      #
+      # MAP only. A --full-bayes NUTS run is minutes rather than seconds and belongs on a machine
+      # someone is watching.
+      - name: Fit
+        run: uv run ltv fit
+
       # Runs the integration tests too, since the data is now present. Those assert the documented
       # row and customer counts, so a silently truncated download fails the build.
       - name: Test
