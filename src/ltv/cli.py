@@ -50,7 +50,9 @@ def info() -> None:
     typer.echo(f"  warehouse built   {built}")
     typer.echo(f"  raw data          {settings.raw_dir}")
     typer.echo(f"  reports           {settings.reports_dir}")
+    typer.echo(f"  models            {settings.model_dir}")
     typer.echo(f"  calibration split {settings.calibration_weeks}w / {settings.holdout_weeks}w")
+    typer.echo(f"  forward horizon   {settings.forward_horizon_days}d")
 
 
 @ingest_app.command("cdnow")
@@ -87,6 +89,48 @@ def transform(ctx: typer.Context) -> None:
     except (TransformError, FileNotFoundError) as exc:
         typer.secho(str(exc), fg=typer.colors.RED, err=True)
         raise typer.Exit(code=1) from exc
+
+
+@app.command()
+def fit(
+    source: str = typer.Option("cdnow", help="Which dataset to fit. Sources fit separately."),
+    full_bayes: bool = typer.Option(
+        False,
+        "--full-bayes",
+        help="Sample the posterior with NUTS instead of taking the MAP estimate. Much slower, and "
+        "the only run whose uncertainty intervals mean anything.",
+    ),
+) -> None:
+    """Fit BG/NBD + Gamma-Gamma on the calibration window and write customer predictions."""
+    # Imported here rather than at module scope: PyMC pulls in a large dependency tree and compiles
+    # nothing until asked, but the import alone is seconds. Paying that on `ltv info` would make the
+    # whole CLI feel broken -- the same reasoning as the dbt import in transform.py.
+    from ltv.fit import run_fit
+    from ltv.models.clv import ModelError
+
+    try:
+        result = run_fit(source, full_bayes=full_bayes, settings=get_settings())
+    except (ModelError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    horizons = ", ".join(f"{horizon}d" for horizon in result.horizons)
+    typer.echo(f"fitted {result.source} ({result.method})")
+    typer.echo(f"  customers        {result.customers:,}")
+    typer.echo(
+        f"  spend model on   {result.spend_customers:,} "
+        f"({result.excluded_customers:,} excluded, no repeat spend)"
+    )
+    typer.echo(f"  horizons         {horizons}")
+    typer.echo(f"  predictions      {result.rows_written:,} rows in model.customer_predictions")
+    typer.echo(f"  saved            {result.purchase_artifact.name}, {result.spend_artifact.name}")
+
+    if not full_bayes:
+        # Said every run, not buried in docs. A MAP fit gives point estimates only, and the
+        # temptation to quote an interval from one is exactly what CLAUDE.md section 6 forbids.
+        typer.echo(
+            "  note             MAP fit: no uncertainty intervals. Use --full-bayes for those."
+        )
 
 
 if __name__ == "__main__":
