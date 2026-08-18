@@ -18,6 +18,10 @@ data/raw/*
 *.duckdb
 *.duckdb.wal
 
+# Fitted models. Build output, rebuilt by `ltv fit`, and a netCDF of a posterior over 23,570
+# customers is not something version control should be carrying.
+data/models/
+
 # dbt
 dbt/target/
 dbt/dbt_packages/

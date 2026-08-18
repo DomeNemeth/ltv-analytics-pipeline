@@ -128,6 +128,45 @@ MUTATIONS = (
         # on this column, so a wrong denominator corrupts the model rather than a report.
         guard="assert_monetary_value_matches_repeat_spend",
     ),
+    # Phase 3. These live in Python rather than SQL, and the dbt suite cannot see any of them --
+    # every one produces a model that fits, converges, and reports plausible numbers.
+    Mutation(
+        name="fit-leakage",
+        path="src/ltv/models/clv.py",
+        old='CALIBRATION_RELATION = "int_customers__rfm_calibration"',
+        new='CALIBRATION_RELATION = "int_customers__rfm_full"',
+        # The most damaging single edit available in this project: it trains on the holdout window,
+        # so Phase 4's metrics come out excellent and mean nothing. Both relations are valid models
+        # with identical schemas, so nothing downstream objects.
+        guard="test_the_fit_reads_the_calibration_window_not_the_full_period",
+    ),
+    Mutation(
+        name="rfm-rename",
+        path="src/ltv/models/clv.py",
+        old='BG_NBD_RENAMES = {"customer_age": "T"}',
+        new='BG_NBD_RENAMES = {"recency": "T", "customer_age": "recency"}',
+        # recency and T are both day counts over the same range, so swapping them fits cleanly and
+        # predicts nonsense.
+        guard="test_customer_age_becomes_T_and_recency_is_left_alone",
+    ),
+    Mutation(
+        name="gamma-gamma-eligibility",
+        path="src/ltv/models/clv.py",
+        old="return self.eligible[list(GAMMA_GAMMA_COLUMNS)].reset_index(drop=True)",
+        new="return self.customers[list(GAMMA_GAMMA_COLUMNS)].reset_index(drop=True)",
+        # Fits the spend model on 14,120 customers whose repeat spend is zero, dragging the
+        # population estimate down without erroring.
+        guard="test_spend_model_sees_only_customers_with_repeat_spend",
+    ),
+    Mutation(
+        name="population-fallback",
+        path="src/ltv/models/clv.py",
+        old="return aligned.fillna(population), fitted_individually",
+        new="return aligned, fitted_individually",
+        # Silently NULLs expected value for 60% of customers, so every segment total in the Phase 5
+        # dashboard would cover 40% of the customer base while looking complete.
+        guard="test_customers_without_repeat_spend_get_the_population_estimate",
+    ),
 )
 
 CHECKS = (
@@ -146,6 +185,29 @@ def run_checks() -> list[str]:
         if completed.returncode != 0:
             failed.append(name)
     return failed
+
+
+def _rebuild_warehouse() -> None:
+    """Rebuild the warehouse from the restored source, so no mutation outlives its own run.
+
+    Restoring the *file* is not enough, and assuming it was cost this project a corrupted fit.
+    A mutation that changes SQL leaves the warehouse **materialised from the mutated model** once
+    the run finishes -- the source file is clean, `git diff` is clean, and the data is wrong. The
+    last mutation of a run is the one that sticks, so the poison is whatever ran last.
+
+    That is exactly what happened: a run ending on `monetary-denominator` left
+    int_customers__rfm_calibration holding monetary_value divided by occasions instead of
+    frequency. The next `ltv fit` read it, fitted Gamma-Gamma on values a third too low, and wrote a
+    predictions table that looked entirely normal. Nothing in the repo could have noticed, because
+    every check here inspects source rather than state.
+
+    Rebuilding in the `finally` costs a few seconds per mutation and makes the failure impossible
+    rather than unlikely. It runs on interrupt too, which is when a half-finished run is most likely
+    to leave something behind.
+    """
+    subprocess.run(  # noqa: S603
+        ("uv", "run", "ltv", "transform"), cwd=REPO_ROOT, capture_output=True, text=True
+    )
 
 
 def check_mutation(mutation: Mutation) -> bool:
@@ -168,6 +230,7 @@ def check_mutation(mutation: Mutation) -> bool:
         failed = run_checks()
     finally:
         mutation.file.write_text(original, encoding="utf-8", newline="")
+        _rebuild_warehouse()
 
     if failed:
         print(f"  caught by: {', '.join(failed)}")

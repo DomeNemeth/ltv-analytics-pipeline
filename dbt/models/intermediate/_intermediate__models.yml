@@ -87,6 +87,12 @@ models:
           Mean spend across repeat occasions, excluding the first purchase, per the Gamma-Gamma
           convention. Zero for one-time buyers.
         data_tests: [not_null]
+      - name: first_occasion_spend
+        description: >
+          Spend on the customer's earliest occasion in the window. Excluded from monetary_value by
+          the Gamma-Gamma convention, and exposed so that exclusion can be verified rather than
+          trusted.
+        data_tests: [not_null]
       - name: is_gamma_gamma_eligible
         description: >
           Has at least one repeat purchase and strictly positive repeat spend. False for the ~60% of

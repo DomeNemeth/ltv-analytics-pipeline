@@ -52,6 +52,20 @@ jobs:
       - name: Transform
         run: uv run ltv transform
 
+      # Fits the models for the same reason the transform step exists: it is a command the README
+      # tells a reader to run, and the unit tests exercise it only on a small synthetic population.
+      # This runs it on the full 23,570 customers, on Linux, from a clean environment.
+      #
+      # Note what this does NOT prove. `ltv fit` selects the numba backend itself, so this runs the
+      # same backend the development host does -- it is not a C-backend portability check. PyTensor
+      # here cannot even link BLAS (pip install, no conda), and its own warning recommends numba as
+      # the fix. Nothing in this project is currently exercised on the C backend.
+      #
+      # MAP only. A --full-bayes NUTS run is minutes rather than seconds and belongs on a machine
+      # someone is watching.
+      - name: Fit
+        run: uv run ltv fit
+
       # Runs the integration tests too, since the data is now present. Those assert the documented
       # row and customer counts, so a silently truncated download fails the build.
       - name: Test

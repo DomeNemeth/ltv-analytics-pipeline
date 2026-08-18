@@ -39,6 +39,8 @@ uv sync                       # install the locked environment
 uv run ltv info               # show resolved config and whether the warehouse is built
 uv run ltv ingest cdnow       # download (checksum-pinned), parse, load raw.cdnow_transactions
 uv run ltv transform          # dbt build: all models plus every dbt test
+uv run ltv fit                # fit BG/NBD + Gamma-Gamma, write model.customer_predictions
+uv run ltv fit --full-bayes   # same, but NUTS instead of MAP -- the only run with real intervals
 uv run pytest                 # Python tests; integration tests skip if source data is absent
 uv run ruff check . && uv run ruff format --check .
 
@@ -78,9 +80,21 @@ anything, because both shaped dependency choices that otherwise look arbitrary.
 - **The project must build without a C compiler.** PyTensor compiles model graphs to C and falls back
   to a much slower pure-Python backend when no compiler is present (`config.cxx == ''`, plus a
   `g++ not detected` warning). `numba` and `nutpie` are therefore pinned: both are prebuilt wheels
-  needing no compiler and no admin rights, and nutpie gives a fast NUTS sampler regardless. Linux CI
-  and the Docker image *do* have gcc, so the pipeline is exercised on both backends — which is a
-  portability guarantee, not just a workaround. Set `PYTENSOR_FLAGS=cxx=` to silence the warning.
+  needing no compiler and no admin rights, and nutpie gives a fast NUTS sampler regardless. Set
+  `PYTENSOR_FLAGS=cxx=` to silence the warning.
+  - **Nothing in this project currently runs on PyTensor's C backend, including in CI.** An earlier
+    version of this section claimed Linux CI exercised it and that this was a portability
+    guarantee. It is not true: `ltv fit` selects numba explicitly (below), so CI runs the same
+    backend the development host does. CI's PyTensor cannot even link BLAS — it is a pip install,
+    not conda — and PyTensor's own warning there recommends numba as the remedy. The portability
+    claim that *is* supported is weaker and worth stating accurately: the fit produces identical
+    customer counts and prediction row counts on Windows and on Linux.
+  - **The Python fallback is not merely slower, it is unusable, and `ltv fit` sets the numba backend
+    itself because of it.** Measured on this project's own data: the BG/NBD MAP fit on CDNOW takes
+    **265 seconds** on the Python backend and **25** under numba, with parameter estimates identical
+    to four decimal places. That is the difference between a command someone runs and a command they
+    stop running. `_use_numba_backend()` in `src/ltv/models/clv.py` sets it in code rather than
+    relying on an environment variable, so a fresh clone behaves like CI does.
 - **Node 22 LTS, not Node 24**, deliberately. Evidence pulls native DuckDB bindings, and where no
   compiler is available a prebuilt binary must exist for the Node ABI. Node 22 has far better
   prebuild coverage than 24.
@@ -167,7 +181,7 @@ Kept current. This section is what makes the repo credible — it must never ove
 - 65 tests pass locally. The fast suite runs offline with no source data; the integration tests
   additionally require the downloaded file. On a clean clone they skip — except when `CI` is set,
   where a skip is escalated to a failure so a missing download can never leave a build green.
-- `ltv transform` builds **8 dbt models and 66 dbt tests**, all passing.
+- `ltv transform` builds **8 dbt models and 67 dbt tests**, all passing.
 - The occasion collapse works and reconciles: 69,659 line items become **67,591 occasions**
   (2,068 absorbed, 3.0%), and calibration (47,907) plus holdout (19,684) sums back to exactly 67,591.
 - The window derivation lands on the canonical Fader & Hardie split with no rounding —
@@ -200,8 +214,7 @@ Kept current. This section is what makes the repo credible — it must never ove
 
 - **CI is green and genuinely exercised.** First run on 2026-08-13 executed the real ingest on Linux
   (69,659 / 23,570) and reported `49 passed` — not 43 passed with 6 skipped, confirming the
-  integration tests actually ran rather than silently skipping. This also proves the pipeline works
-  on PyTensor's C backend, not only the numba one used locally. Re-confirmed on the Phase 2 branch
+  integration tests actually ran rather than silently skipping. Re-confirmed on the Phase 2 branch
   on 2026-08-18: `PASS=74` from dbt and `65 passed` from pytest, again with no skips. Note that CI
   triggers on `push: branches: [main]` and `pull_request` only, so a feature branch is exercised
   when its PR opens, not when it is pushed — a branch can sit for days looking untested because it
@@ -222,7 +235,101 @@ is zero. Worth stating plainly because the earlier estimate was wrong: the "68 z
 are almost all one-time buyers who were already excluded on that ground, so the zero-value rows cost
 one additional customer, not 68.
 
-**Not built yet:** model fitting, validation, marts, dashboard, Prefect flow, Docker, second data
+**Phase 3 — the CLV fit:**
+
+- `ltv fit` runs in **58 seconds** on the compiler-less development host at MAP, inside the
+  one-minute budget the plan set — but only because the fit selects the numba backend itself. On
+  PyTensor's Python fallback the same fit takes 265 seconds. See §4.
+- Fits **23,570 customers** with BG/NBD and **9,450** with Gamma-Gamma, excluding **14,120** who have
+  no repeat spend to learn from. That exclusion count matches the dbt `is_gamma_gamma_eligible` flag
+  exactly — the model and the dashboard cannot disagree about who exists.
+- Writes **47,140 rows** to `model.customer_predictions`: every customer at both horizons, 273 days
+  (the holdout length, read from the warehouse so it cannot drift from the scoring window) and 365
+  days (the headline LTV figure). `horizon_days` is a column, so a revenue number can never be read
+  without the window it applies to.
+- Excluded customers receive the fitted **population** spend estimate rather than a NULL or a zero,
+  flagged as `spend_estimate_source = 'population_mean'`. They are 60% of the customer base, so
+  NULLing them would leave every dashboard total silently covering the other 40%.
+- BG/NBD estimates on the calibration window: `r = 0.250`, `alpha = 33.0`, `a = 0.717`, `b = 2.125`.
+  Recorded here so Phase 4 can compare them against the published CDNOW figures **read from the
+  source paper rather than recalled** — and note the unit conversion that comparison needs, since
+  the published work is in weeks and this project works in days, which rescales `alpha` by 7 while
+  leaving `r` alone. No benchmark claim until that check is actually done.
+- Expected spend per purchase: **35.83** population mean, **35.86** average across all customers.
+  Total predicted forward revenue is **$642,283** over 273 days and **$815,143** over 365.
+- `probability_alive` is within [0, 1] and interval columns are NULL on every MAP row. (An earlier
+  version of this list also claimed forward revenue was verified to equal purchases times value.
+  It does, and the claim was worthless: `predict()` computes it with that multiplication, so no
+  reachable defect could make it fail. Removed under §9's own test.)
+- CI runs the fit on the full population on Linux and produces identical counts to the Windows
+  development host: 23,570 fitted, 9,450 in the spend model, 14,120 excluded, 47,140 rows. That is a
+  cross-platform reproducibility check. It is **not** a backend portability check — see §4.
+- Mutation-verified: fitting on `int_customers__rfm_full` instead of the calibration summary,
+  swapping `recency` for `customer_age` in the `T` rename, fitting Gamma-Gamma on customers with no
+  repeat spend, and dropping the population fallback. All four were broken deliberately and caught.
+  None is visible to the dbt suite.
+
+**The 14% under-prediction, diagnosed.** At 273 days the model predicts **16,867** purchases against
+**19,684** observed. `clv-validator` established what this is and is not:
+
+- **Not a MAP or prior artefact.** An independent re-implementation of the BG/NBD likelihood,
+  maximised with no priors at all, lands 0.17 log-likelihood units from our MAP over 23,570
+  observations and predicts 16,874. `--full-bayes` will produce intervals; it will not move the
+  point forecast.
+- **Not an apples-to-oranges comparison.** Every one of the 23,570 customers was first seen between
+  1997-01-01 and 1997-03-25, so no holdout occasion is anyone's first purchase and BG/NBD's repeat
+  count is the right comparand. The horizon lines up to the day.
+- **It is real misspecification: the process is not stationary.** Monthly repeat occasions fall ~40%
+  through calibration (3,690 → 2,220) and then *plateau* at ~2,200 through the holdout rather than
+  continuing down. BG/NBD can only explain the calibration decline as dropout plus heterogeneity
+  sorting, so it extrapolates a decay the real cohort stops doing. In-sample fit is excellent
+  (+0.8% on calibration repeat transactions); the error is entirely out-of-sample and grows with
+  horizon (ratio 0.945 at 30 days → 0.857 at 273).
+- **The shortfall is concentrated:** customers with exactly 1 or 2 calibration repeats account for
+  1,940 of the 2,817 missing purchases (69%). BG/NBD writes them off too aggressively — 37.8% of the
+  one-repeat group came back.
+
+Phase 4 should fit MBG/NBD or Pareto/NBD on the same frame and compare that bucket table. Either
+outcome is a stronger README line than a bare error number.
+
+**Two assumption violations the README must disclose.** Both were measured, not assumed:
+
+- **Gamma-Gamma's frequency/monetary independence does not hold here.** Spearman ρ = **+0.198**
+  (p = 3e-84) across the 9,450 eligible customers, and mean repeat order value climbs monotonically
+  with frequency from 33.42 at one repeat to 44.93 at eleven or more — a 34% spread. The model
+  shrinks toward a common population mean, so it systematically under-values heavy buyers and
+  over-values light ones. That is the exact axis a "which segments are worth acquiring" conclusion
+  runs along, so segment-level LTV rankings are compressed.
+- **`probability_alive` is exactly 1.0 for 14,119 customers — 59.9% of the base — by construction.**
+  BG/NBD only allows dropout immediately after a purchase, so a customer with zero repeats has never
+  had an opportunity to drop out. Only 14.6% of them actually transacted in the holdout window. This
+  is a model tautology, not a finding: no segment definition or dashboard tile may treat it as
+  evidence that these customers are healthy.
+
+**Outliers are not a problem here**, checked so it does not get re-litigated: max repeat order value
+is 756.47, the 99.9th percentile is 300.63, and the top 10 customers hold 1.24% of eligible repeat
+spend. Trimming barely moves the population mean (35.83 untrimmed, 34.41 dropping the top 1%).
+
+**A build-hygiene failure worth remembering, because it produced wrong numbers behind a clean
+`git diff`.** `scripts/mutation_check.py` restored the source file after each mutation but never
+rebuilt the warehouse, so a run ending on `monetary-denominator` left
+`int_customers__rfm_calibration` **materialised from mutated SQL** — `monetary_value` divided by
+occasions instead of repeat occasions, about a third too low. The next `ltv fit` read it, fitted
+Gamma-Gamma on corrupted spend, and wrote a predictions table that looked entirely normal: positive,
+smaller than total spend, correctly zero for one-time buyers. Nothing in the repo could see it. Every
+Python test builds its own synthetic frame, and the dbt test that does catch it only runs on a
+rebuild. Two fixes, both in place: the harness now rebuilds in its `finally` so no mutation outlives
+its run, and `check_assumptions` verifies its own inputs — `monetary_value * frequency` must equal
+`total_spend - first_occasion_spend`, which is why the macro now exposes `first_occasion_spend`.
+**The lesson generalises: restoring source is not restoring state.**
+
+**Not exercised yet:** `--full-bayes`. The NUTS path is implemented and covered by the synthetic
+tests, but it has never been run on the full CDNOW population, so no uncertainty interval in this
+repo has been produced from real data. No interval claim may be made until it has. Relatedly,
+`Settings.random_seed` currently reaches nothing: the MAP path is deterministic and takes no seed,
+and the seeded NUTS path has never run. Nothing is unreproducible today, but no seeded run exists.
+
+**Not built yet:** validation and error metrics, marts, dashboard, Prefect flow, Docker, second data
 source, published dashboard URL.
 
 **Deliberate non-goals:** streaming/incremental loads, a warehouse other than DuckDB, multi-tenant
@@ -234,10 +341,15 @@ Three agents live in `.claude/agents/`. Use them when a **fresh, focused context
 a large diff, a whole-layer consistency sweep, a cross-file assumptions audit. Do not delegate small
 or already-in-context work; do it inline and say the subagent was skipped and why.
 
-- `dbt-modeler` — writes/reviews dbt models, tests, docs; owns naming, materialization, layer boundaries.
+- `dbt-modeler` — writes/reviews dbt models, tests, docs; owns naming, materialization, layer
+  boundaries. Ran its whole-layer pass on Phase 2; findings and fixes are in §8.
 - `clv-validator` — statistical critic. **Must not write modelling code.** Audits assumptions, the
   calibration/holdout split, metric choice, and feature leakage. Must sign off before any results
-  claim enters the README.
+  claim enters the README. Ran its first audit on the Phase 3 fit and **withheld sign-off** — it
+  found the corrupted-warehouse fit, diagnosed the 14% gap as non-stationarity rather than an
+  estimation problem, and measured two assumption violations (§8). All are now fixed or disclosed.
+  It is still owed the Phase 4 metrics audit, and must sign off before any accuracy claim reaches
+  the README.
 - `repo-reviewer` — pre-commit diff review against portfolio standards.
 
 **Ask reviewers to verify by mutation, not by reading.** The Phase 1 review found three tests that
@@ -249,8 +361,10 @@ than no test, because it buys false confidence.
 
 `scripts/mutation_check.py` is now the harness for this, added in Phase 2 once it was clear the need
 was recurring. It applies one deliberate defect at a time, runs `ltv transform` and `pytest`,
-restores the file, and reports which guard noticed. **10 mutations, 10 caught.** Add a mutation
-whenever a test claims to protect something load-bearing. Running it corrected a belief that reading
+restores the file, and reports which guard noticed. **14 mutations, 14 caught.** Add a mutation
+whenever a test claims to protect something load-bearing. Four of the fourteen now break Python
+rather than SQL: the dbt suite is blind to all of them, because every one produces a model that
+fits, converges, and reports plausible numbers. Running it corrected a belief that reading
 could not have: the weakened-occasion-grain mutation is caught by the `unique` test on
 `occasion_id`, **not** by `assert_occasions_collapsed`, which needed its own mutation to prove it
 can fail at all.
