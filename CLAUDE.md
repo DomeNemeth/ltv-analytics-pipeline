@@ -80,9 +80,15 @@ anything, because both shaped dependency choices that otherwise look arbitrary.
 - **The project must build without a C compiler.** PyTensor compiles model graphs to C and falls back
   to a much slower pure-Python backend when no compiler is present (`config.cxx == ''`, plus a
   `g++ not detected` warning). `numba` and `nutpie` are therefore pinned: both are prebuilt wheels
-  needing no compiler and no admin rights, and nutpie gives a fast NUTS sampler regardless. Linux CI
-  and the Docker image *do* have gcc, so the pipeline is exercised on both backends — which is a
-  portability guarantee, not just a workaround. Set `PYTENSOR_FLAGS=cxx=` to silence the warning.
+  needing no compiler and no admin rights, and nutpie gives a fast NUTS sampler regardless. Set
+  `PYTENSOR_FLAGS=cxx=` to silence the warning.
+  - **Nothing in this project currently runs on PyTensor's C backend, including in CI.** An earlier
+    version of this section claimed Linux CI exercised it and that this was a portability
+    guarantee. It is not true: `ltv fit` selects numba explicitly (below), so CI runs the same
+    backend the development host does. CI's PyTensor cannot even link BLAS — it is a pip install,
+    not conda — and PyTensor's own warning there recommends numba as the remedy. The portability
+    claim that *is* supported is weaker and worth stating accurately: the fit produces identical
+    customer counts and prediction row counts on Windows and on Linux.
   - **The Python fallback is not merely slower, it is unusable, and `ltv fit` sets the numba backend
     itself because of it.** Measured on this project's own data: the BG/NBD MAP fit on CDNOW takes
     **265 seconds** on the Python backend and **25** under numba, with parameter estimates identical
@@ -208,8 +214,7 @@ Kept current. This section is what makes the repo credible — it must never ove
 
 - **CI is green and genuinely exercised.** First run on 2026-08-13 executed the real ingest on Linux
   (69,659 / 23,570) and reported `49 passed` — not 43 passed with 6 skipped, confirming the
-  integration tests actually ran rather than silently skipping. This also proves the pipeline works
-  on PyTensor's C backend, not only the numba one used locally. Re-confirmed on the Phase 2 branch
+  integration tests actually ran rather than silently skipping. Re-confirmed on the Phase 2 branch
   on 2026-08-18: `PASS=74` from dbt and `65 passed` from pytest, again with no skips. Note that CI
   triggers on `push: branches: [main]` and `pull_request` only, so a feature branch is exercised
   when its PR opens, not when it is pushed — a branch can sit for days looking untested because it
@@ -253,6 +258,9 @@ one additional customer, not 68.
 - Verified on the real table: expected forward revenue equals expected purchases times expected
   value for all 47,140 rows, `probability_alive` is within [0, 1], and interval columns are NULL on
   every MAP row.
+- CI runs the fit on the full population on Linux and produces identical counts to the Windows
+  development host: 23,570 fitted, 9,450 in the spend model, 14,120 excluded, 47,140 rows. That is a
+  cross-platform reproducibility check. It is **not** a backend portability check — see §4.
 - Mutation-verified: fitting on `int_customers__rfm_full` instead of the calibration summary,
   swapping `recency` for `customer_age` in the `T` rename, fitting Gamma-Gamma on customers with no
   repeat spend, and dropping the population fallback. All four were broken deliberately and caught.
