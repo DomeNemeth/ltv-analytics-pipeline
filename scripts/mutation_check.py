@@ -109,18 +109,24 @@ def run_checks() -> list[str]:
 
 def check_mutation(mutation: Mutation) -> bool:
     """Apply one mutation, run the suite, restore. True if the suite noticed."""
-    original = mutation.file.read_text(encoding="utf-8")
+    # newline="" both ways, so line endings survive the round trip byte for byte. Without it, text
+    # mode rewrites every line on Windows and the harness leaves half the dbt layer showing as
+    # modified with an empty diff -- noise that makes a real uncommitted change easy to miss.
+    # Path.read_text gained a newline argument only in 3.13, and this project pins 3.12.
+    with mutation.file.open("r", encoding="utf-8", newline="") as handle:
+        original = handle.read()
     if mutation.old not in original:
         raise SystemExit(
             f"{mutation.name}: the text to mutate is no longer in {mutation.path}. "
             f"The mutation is stale -- update it to match the current code.\n  {mutation.old!r}"
         )
 
+    mutated = original.replace(mutation.old, mutation.new)
     try:
-        mutation.file.write_text(original.replace(mutation.old, mutation.new), encoding="utf-8")
+        mutation.file.write_text(mutated, encoding="utf-8", newline="")
         failed = run_checks()
     finally:
-        mutation.file.write_text(original, encoding="utf-8")
+        mutation.file.write_text(original, encoding="utf-8", newline="")
 
     if failed:
         print(f"  caught by: {', '.join(failed)}")
