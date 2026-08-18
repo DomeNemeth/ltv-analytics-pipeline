@@ -39,6 +39,8 @@ uv sync                       # install the locked environment
 uv run ltv info               # show resolved config and whether the warehouse is built
 uv run ltv ingest cdnow       # download (checksum-pinned), parse, load raw.cdnow_transactions
 uv run ltv transform          # dbt build: all models plus every dbt test
+uv run ltv fit                # fit BG/NBD + Gamma-Gamma, write model.customer_predictions
+uv run ltv fit --full-bayes   # same, but NUTS instead of MAP -- the only run with real intervals
 uv run pytest                 # Python tests; integration tests skip if source data is absent
 uv run ruff check . && uv run ruff format --check .
 
@@ -81,6 +83,12 @@ anything, because both shaped dependency choices that otherwise look arbitrary.
   needing no compiler and no admin rights, and nutpie gives a fast NUTS sampler regardless. Linux CI
   and the Docker image *do* have gcc, so the pipeline is exercised on both backends — which is a
   portability guarantee, not just a workaround. Set `PYTENSOR_FLAGS=cxx=` to silence the warning.
+  - **The Python fallback is not merely slower, it is unusable, and `ltv fit` sets the numba backend
+    itself because of it.** Measured on this project's own data: the BG/NBD MAP fit on CDNOW takes
+    **265 seconds** on the Python backend and **25** under numba, with parameter estimates identical
+    to four decimal places. That is the difference between a command someone runs and a command they
+    stop running. `_use_numba_backend()` in `src/ltv/models/clv.py` sets it in code rather than
+    relying on an environment variable, so a fresh clone behaves like CI does.
 - **Node 22 LTS, not Node 24**, deliberately. Evidence pulls native DuckDB bindings, and where no
   compiler is available a prebuilt binary must exist for the Node ABI. Node 22 has far better
   prebuild coverage than 24.
@@ -222,7 +230,45 @@ is zero. Worth stating plainly because the earlier estimate was wrong: the "68 z
 are almost all one-time buyers who were already excluded on that ground, so the zero-value rows cost
 one additional customer, not 68.
 
-**Not built yet:** model fitting, validation, marts, dashboard, Prefect flow, Docker, second data
+**Phase 3 — the CLV fit:**
+
+- `ltv fit` runs in **58 seconds** on the compiler-less development host at MAP, inside the
+  one-minute budget the plan set — but only because the fit selects the numba backend itself. On
+  PyTensor's Python fallback the same fit takes 265 seconds. See §4.
+- Fits **23,570 customers** with BG/NBD and **9,450** with Gamma-Gamma, excluding **14,120** who have
+  no repeat spend to learn from. That exclusion count matches the dbt `is_gamma_gamma_eligible` flag
+  exactly — the model and the dashboard cannot disagree about who exists.
+- Writes **47,140 rows** to `model.customer_predictions`: every customer at both horizons, 273 days
+  (the holdout length, read from the warehouse so it cannot drift from the scoring window) and 365
+  days (the headline LTV figure). `horizon_days` is a column, so a revenue number can never be read
+  without the window it applies to.
+- Excluded customers receive the fitted **population** spend estimate rather than a NULL or a zero,
+  flagged as `spend_estimate_source = 'population_mean'`. They are 60% of the customer base, so
+  NULLing them would leave every dashboard total silently covering the other 40%.
+- BG/NBD estimates on the calibration window: `r = 0.250`, `alpha = 33.0`, `a = 0.717`, `b = 2.125`.
+  Recorded here so Phase 4 can compare them against the published CDNOW figures **read from the
+  source paper rather than recalled** — and note the unit conversion that comparison needs, since
+  the published work is in weeks and this project works in days, which rescales `alpha` by 7 while
+  leaving `r` alone. No benchmark claim until that check is actually done.
+- Verified on the real table: expected forward revenue equals expected purchases times expected
+  value for all 47,140 rows, `probability_alive` is within [0, 1], and interval columns are NULL on
+  every MAP row.
+- Mutation-verified: fitting on `int_customers__rfm_full` instead of the calibration summary,
+  swapping `recency` for `customer_age` in the `T` rename, fitting Gamma-Gamma on customers with no
+  repeat spend, and dropping the population fallback. All four were broken deliberately and caught.
+  None is visible to the dbt suite.
+
+**Known and not yet explained:** at the 273-day horizon the model predicts **16,867** purchases
+against **19,684** actually observed in the holdout window — a 14% under-prediction in aggregate.
+This is stated here rather than left for a reader to find. Whether it is the MAP estimate, the
+default priors, or a real limitation of BG/NBD on this data is a Phase 4 question, and
+`clv-validator` must answer it before any accuracy claim goes in the README.
+
+**Not exercised yet:** `--full-bayes`. The NUTS path is implemented and covered by the synthetic
+tests, but it has never been run on the full CDNOW population, so no uncertainty interval in this
+repo has been produced from real data. No interval claim may be made until it has.
+
+**Not built yet:** validation and error metrics, marts, dashboard, Prefect flow, Docker, second data
 source, published dashboard URL.
 
 **Deliberate non-goals:** streaming/incremental loads, a warehouse other than DuckDB, multi-tenant
@@ -234,10 +280,13 @@ Three agents live in `.claude/agents/`. Use them when a **fresh, focused context
 a large diff, a whole-layer consistency sweep, a cross-file assumptions audit. Do not delegate small
 or already-in-context work; do it inline and say the subagent was skipped and why.
 
-- `dbt-modeler` — writes/reviews dbt models, tests, docs; owns naming, materialization, layer boundaries.
+- `dbt-modeler` — writes/reviews dbt models, tests, docs; owns naming, materialization, layer
+  boundaries. Ran its whole-layer pass on Phase 2; findings and fixes are in §8.
 - `clv-validator` — statistical critic. **Must not write modelling code.** Audits assumptions, the
   calibration/holdout split, metric choice, and feature leakage. Must sign off before any results
-  claim enters the README.
+  claim enters the README. **Owed two audits and has had neither:** the Phase 3 fit (are the BG/NBD
+  assumptions plausible on this data, is the fit sane) and Phase 4's metrics. The 14%
+  under-prediction recorded in §8 is the first thing to hand it.
 - `repo-reviewer` — pre-commit diff review against portfolio standards.
 
 **Ask reviewers to verify by mutation, not by reading.** The Phase 1 review found three tests that
@@ -249,8 +298,10 @@ than no test, because it buys false confidence.
 
 `scripts/mutation_check.py` is now the harness for this, added in Phase 2 once it was clear the need
 was recurring. It applies one deliberate defect at a time, runs `ltv transform` and `pytest`,
-restores the file, and reports which guard noticed. **10 mutations, 10 caught.** Add a mutation
-whenever a test claims to protect something load-bearing. Running it corrected a belief that reading
+restores the file, and reports which guard noticed. **14 mutations, 14 caught.** Add a mutation
+whenever a test claims to protect something load-bearing. Four of the fourteen now break Python
+rather than SQL: the dbt suite is blind to all of them, because every one produces a model that
+fits, converges, and reports plausible numbers. Running it corrected a belief that reading
 could not have: the weakened-occasion-grain mutation is caught by the `unique` test on
 `occasion_id`, **not** by `assert_occasions_collapsed`, which needed its own mutation to prove it
 can fail at all.
