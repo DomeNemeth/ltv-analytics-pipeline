@@ -187,6 +187,29 @@ def run_checks() -> list[str]:
     return failed
 
 
+def _rebuild_warehouse() -> None:
+    """Rebuild the warehouse from the restored source, so no mutation outlives its own run.
+
+    Restoring the *file* is not enough, and assuming it was cost this project a corrupted fit.
+    A mutation that changes SQL leaves the warehouse **materialised from the mutated model** once
+    the run finishes -- the source file is clean, `git diff` is clean, and the data is wrong. The
+    last mutation of a run is the one that sticks, so the poison is whatever ran last.
+
+    That is exactly what happened: a run ending on `monetary-denominator` left
+    int_customers__rfm_calibration holding monetary_value divided by occasions instead of
+    frequency. The next `ltv fit` read it, fitted Gamma-Gamma on values a third too low, and wrote a
+    predictions table that looked entirely normal. Nothing in the repo could have noticed, because
+    every check here inspects source rather than state.
+
+    Rebuilding in the `finally` costs a few seconds per mutation and makes the failure impossible
+    rather than unlikely. It runs on interrupt too, which is when a half-finished run is most likely
+    to leave something behind.
+    """
+    subprocess.run(  # noqa: S603
+        ("uv", "run", "ltv", "transform"), cwd=REPO_ROOT, capture_output=True, text=True
+    )
+
+
 def check_mutation(mutation: Mutation) -> bool:
     """Apply one mutation, run the suite, restore. True if the suite noticed."""
     # newline="" both ways, so line endings survive the round trip byte for byte. Without it, text
@@ -207,6 +230,7 @@ def check_mutation(mutation: Mutation) -> bool:
         failed = run_checks()
     finally:
         mutation.file.write_text(original, encoding="utf-8", newline="")
+        _rebuild_warehouse()
 
     if failed:
         print(f"  caught by: {', '.join(failed)}")
