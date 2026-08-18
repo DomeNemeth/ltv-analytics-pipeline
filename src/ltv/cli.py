@@ -12,6 +12,7 @@ from ltv import __version__
 from ltv.config import get_settings
 from ltv.ingest.cdnow import CDNOW_MASTER, CDNOWFormatError, ingest_cdnow
 from ltv.ingest.fetch import SourceDataError
+from ltv.transform import TransformError, run_dbt
 
 app = typer.Typer(
     name="ltv",
@@ -72,6 +73,20 @@ def ingest_cdnow_command(
     typer.echo(f"  rows       {result.rows:,}")
     typer.echo(f"  customers  {result.customers:,}")
     typer.echo(f"  data from  {CDNOW_MASTER.citation}")
+
+
+@app.command(
+    # Anything after `transform` is handed to dbt untouched, so `ltv transform test --select
+    # staging` works without this command having to mirror dbt's entire flag surface.
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def transform(ctx: typer.Context) -> None:
+    """Build the dbt models and run their tests. Extra arguments are passed through to dbt."""
+    try:
+        run_dbt(ctx.args or None, get_settings())
+    except (TransformError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
 
 
 if __name__ == "__main__":

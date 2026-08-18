@@ -1,0 +1,36 @@
+version: 2
+
+models:
+  - name: stg_cdnow__transactions
+    description: >
+      CDNOW line items conformed to the staging contract. One row per source line, unfiltered.
+    columns:
+      - name: source
+        description: Which dataset this row came from. The discriminator for the unioned layer.
+        data_tests:
+          - not_null
+          - accepted_values:
+              arguments:
+                values: ["cdnow"]
+      - name: customer_id
+        description: Customer identifier, unique within `source`.
+        data_tests: [not_null]
+      - name: order_id
+        description: >
+          Purchase-occasion surrogate for CDNOW (customer + date), since the source has no order
+          identifier. Not unique here -- several line items share an order.
+        data_tests: [not_null]
+      - name: order_date
+        data_tests: [not_null]
+      - name: quantity
+        description: CDs on this line item.
+        data_tests: [not_null]
+      - name: unit_price
+        description: Average price per CD on this line item, derived as gross_amount / quantity.
+        data_tests: [not_null]
+      - name: gross_amount
+        description: Line item total in dollars. Zero for the 80 promotional rows.
+        data_tests: [not_null]
+      - name: is_return
+        description: Always false for CDNOW, which contains no returns.
+        data_tests: [not_null]
