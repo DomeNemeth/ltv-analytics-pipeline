@@ -128,6 +128,8 @@ def load_calibration(source: str, settings: Settings | None = None) -> Calibrati
                     recency,
                     customer_age,
                     monetary_value,
+                    total_spend,
+                    first_occasion_spend,
                     is_gamma_gamma_eligible
                 from {CALIBRATION_RELATION}
                 where source = ?
@@ -154,7 +156,8 @@ def load_calibration(source: str, settings: Settings | None = None) -> Calibrati
 
     # decimal(12,4) arrives as Decimal objects, which PyMC cannot broadcast. Cast once, here, rather
     # than letting a dtype error surface from inside a model graph.
-    customers["monetary_value"] = customers["monetary_value"].astype(float)
+    for column in ("monetary_value", "total_spend", "first_occasion_spend"):
+        customers[column] = customers[column].astype(float)
 
     return CalibrationData(source=source, customers=customers, holdout_days=int(window[0]))
 
@@ -184,6 +187,38 @@ def check_assumptions(data: CalibrationData) -> None:
     negative = customers["frequency"] < 0
     if negative.any():
         raise ModelError(f"{negative.sum():,} customers have negative frequency.")
+
+    # A customer whose entire history is a single purchase on the last day of the window has T = 0,
+    # which BG/NBD cannot use. Unreachable on CDNOW (the minimum customer_age is 189 days) but
+    # reachable the moment a source with a later acquisition tail lands in Phase 7.
+    no_age = customers["customer_age"] <= 0
+    if no_age.any():
+        raise ModelError(
+            f"{no_age.sum():,} customers have customer_age of zero or less, so they were first "
+            f"seen on or after the window closed and BG/NBD has no observation period for them."
+        )
+
+    # The check that would have caught a corrupted warehouse instantly, and that nothing else can.
+    #
+    # This project once fitted Gamma-Gamma on monetary_value divided by `occasions` instead of
+    # `frequency` -- values a third too low -- because a mutation-testing run left the warehouse
+    # materialised from mutated SQL while the source file was clean. Every downstream number was
+    # wrong and entirely plausible: positive, smaller than total_spend, correctly zero for one-time
+    # buyers. No Python test could see it, because they all build their own synthetic frames, and
+    # the dbt test that does catch it only runs when someone rebuilds.
+    #
+    # So the fit verifies its own inputs rather than trusting that the layer that produced them was
+    # correct at the time. The tolerance is for the 4-decimal rounding in monetary_value itself.
+    repeat_spend = customers["total_spend"] - customers["first_occasion_spend"]
+    reconstructed = customers["monetary_value"] * customers["frequency"]
+    inconsistent_spend = (reconstructed - repeat_spend).abs() > 0.01
+    if inconsistent_spend.any():
+        raise ModelError(
+            f"{inconsistent_spend.sum():,} customers have a monetary_value that does not "
+            f"reconstruct their repeat spend (monetary_value * frequency should equal "
+            f"total_spend minus first_occasion_spend). The warehouse does not match the "
+            f"transformation logic -- rebuild it with `uv run ltv transform` before fitting."
+        )
 
     # Eligibility is decided in dbt; this asserts the flag still means what the fit assumes it
     # means. If they ever disagree, the Gamma-Gamma fit would quietly include zero-spend customers.

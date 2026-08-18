@@ -40,6 +40,8 @@ CALIBRATION_COLUMNS = (
     "recency",
     "customer_age",
     "monetary_value",
+    "total_spend",
+    "first_occasion_spend",
     "is_gamma_gamma_eligible",
 )
 
@@ -61,6 +63,10 @@ def synthetic_customers(n: int = 150, seed: int = 7) -> pd.DataFrame:
     # case that separates "bought more than once" from "has spend to learn from".
     monetary_value[:3] = np.where(frequency[:3] > 0, 0.0, monetary_value[:3])
 
+    # Built so the identity check_assumptions enforces holds by construction: repeat spend is
+    # monetary_value * frequency, and total_spend adds the first occasion back on.
+    first_occasion_spend = rng.gamma(3.0, 10.0, n)
+
     return pd.DataFrame(
         {
             "customer_id": np.arange(1, n + 1, dtype=np.int32),
@@ -68,6 +74,8 @@ def synthetic_customers(n: int = 150, seed: int = 7) -> pd.DataFrame:
             "recency": recency,
             "customer_age": customer_age,
             "monetary_value": monetary_value,
+            "first_occasion_spend": first_occasion_spend,
+            "total_spend": monetary_value * frequency + first_occasion_spend,
             "is_gamma_gamma_eligible": (frequency > 0) & (monetary_value > 0),
         }
     )
@@ -158,6 +166,34 @@ def test_a_population_with_no_repeat_spend_is_rejected() -> None:
     data = synthetic_data(is_gamma_gamma_eligible=False)
 
     with pytest.raises(ModelError, match="no customer|No customer"):
+        check_assumptions(data)
+
+
+def test_a_monetary_value_that_does_not_reconstruct_repeat_spend_is_rejected() -> None:
+    """The guard against fitting on a warehouse that does not match the transformation logic.
+
+    This is not hypothetical. A mutation-testing run once left the warehouse materialised from
+    mutated SQL -- monetary_value divided by occasions instead of frequency, a third too low --
+    while the source file was clean and `git diff` showed nothing. The fit consumed it and wrote a
+    predictions table that looked entirely normal. Dividing by the occasion count is exactly what
+    this reproduces.
+    """
+    data = synthetic_data()
+    occasions = data.customers["frequency"] + 1
+    data.customers["monetary_value"] = (
+        data.customers["monetary_value"] * data.customers["frequency"] / occasions
+    )
+
+    with pytest.raises(ModelError, match="does not reconstruct their repeat spend"):
+        check_assumptions(data)
+
+
+def test_customer_age_of_zero_is_rejected() -> None:
+    data = synthetic_data()
+    data.customers.loc[0, "customer_age"] = 0
+    data.customers.loc[0, "recency"] = 0
+
+    with pytest.raises(ModelError, match="customer_age of zero"):
         check_assumptions(data)
 
 

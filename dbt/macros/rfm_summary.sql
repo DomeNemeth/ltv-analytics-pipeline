@@ -90,6 +90,13 @@ select
     last_order_date,
     cast(total_spend as decimal(12, 2)) as total_spend,
 
+    -- Exposed so the identity monetary_value * frequency = total_spend - first_occasion_spend can
+    -- be asserted exactly, both here and by the Python fit before it trains on these numbers.
+    -- Without it, a wrong denominator produces values that are simply plausible: smaller than
+    -- total_spend, positive, correctly zero for one-time buyers, and impossible to falsify from the
+    -- other columns alone.
+    cast(first_occasion_spend as decimal(12, 2)) as first_occasion_spend,
+
     -- Gamma-Gamma is fitted on the mean value of *repeat* transactions, so the first purchase is
     -- excluded from the numerator as well as the denominator. Zero for one-time buyers, who carry
     -- no information about repeat spend and are excluded from the fit below.
