@@ -35,6 +35,10 @@ dashboard/build/
 # PyTensor compile cache
 .pytensor/
 
+# Working roadmap. CLAUDE.md is the public status document and records what is verified;
+# the roadmap records what is planned, and plans change.
+docs/ROADMAP.md
+
 # OS / editor
 .DS_Store
 Thumbs.db
