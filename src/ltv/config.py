@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     calibration_weeks: int = 39
     holdout_weeks: int = 39
 
+    # The headline LTV horizon, in days. Predictions are also always emitted at the holdout length,
+    # which is derived from the warehouse rather than set here -- that one has to match the scoring
+    # window exactly or Phase 4 stops comparing like with like.
+    forward_horizon_days: int = 365
+
     random_seed: int = 42
 
     @property
@@ -68,9 +73,14 @@ class Settings(BaseSettings):
         """Generated validation metrics and charts. Committed -- they are project output."""
         return self.repo_root / "reports"
 
+    @property
+    def model_dir(self) -> Path:
+        """Fitted model artifacts. Gitignored -- rebuilt by ``ltv fit``, and large."""
+        return self.data_dir / "models"
+
     def ensure_dirs(self) -> None:
         """Create the directories the pipeline writes to. Safe to call repeatedly."""
-        for path in (self.data_dir, self.raw_dir, self.reports_dir):
+        for path in (self.data_dir, self.raw_dir, self.reports_dir, self.model_dir):
             path.mkdir(parents=True, exist_ok=True)
 
 
