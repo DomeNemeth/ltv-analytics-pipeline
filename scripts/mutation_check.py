@@ -128,6 +128,45 @@ MUTATIONS = (
         # on this column, so a wrong denominator corrupts the model rather than a report.
         guard="assert_monetary_value_matches_repeat_spend",
     ),
+    # Phase 3. These live in Python rather than SQL, and the dbt suite cannot see any of them --
+    # every one produces a model that fits, converges, and reports plausible numbers.
+    Mutation(
+        name="fit-leakage",
+        path="src/ltv/models/clv.py",
+        old='CALIBRATION_RELATION = "int_customers__rfm_calibration"',
+        new='CALIBRATION_RELATION = "int_customers__rfm_full"',
+        # The most damaging single edit available in this project: it trains on the holdout window,
+        # so Phase 4's metrics come out excellent and mean nothing. Both relations are valid models
+        # with identical schemas, so nothing downstream objects.
+        guard="test_the_fit_reads_the_calibration_window_not_the_full_period",
+    ),
+    Mutation(
+        name="rfm-rename",
+        path="src/ltv/models/clv.py",
+        old='BG_NBD_RENAMES = {"customer_age": "T"}',
+        new='BG_NBD_RENAMES = {"recency": "T", "customer_age": "recency"}',
+        # recency and T are both day counts over the same range, so swapping them fits cleanly and
+        # predicts nonsense.
+        guard="test_customer_age_becomes_T_and_recency_is_left_alone",
+    ),
+    Mutation(
+        name="gamma-gamma-eligibility",
+        path="src/ltv/models/clv.py",
+        old="return self.eligible[list(GAMMA_GAMMA_COLUMNS)].reset_index(drop=True)",
+        new="return self.customers[list(GAMMA_GAMMA_COLUMNS)].reset_index(drop=True)",
+        # Fits the spend model on 14,120 customers whose repeat spend is zero, dragging the
+        # population estimate down without erroring.
+        guard="test_spend_model_sees_only_customers_with_repeat_spend",
+    ),
+    Mutation(
+        name="population-fallback",
+        path="src/ltv/models/clv.py",
+        old="return aligned.fillna(population), fitted_individually",
+        new="return aligned, fitted_individually",
+        # Silently NULLs expected value for 60% of customers, so every segment total in the Phase 5
+        # dashboard would cover 40% of the customer base while looking complete.
+        guard="test_customers_without_repeat_spend_get_the_population_estimate",
+    ),
 )
 
 CHECKS = (
