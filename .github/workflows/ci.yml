@@ -66,6 +66,28 @@ jobs:
       - name: Fit
         run: uv run ltv fit
 
+      # Scores the fit against the holdout window. This is also the only step that builds the
+      # post-fit half of the dbt DAG -- `ltv transform` above deliberately excludes `tag:post_fit`,
+      # because those models read a predictions table that does not exist until the fit has run.
+      # So this step runs four dbt tests nothing else in CI reaches, including the guard that the
+      # predictions still match the data they were fitted on.
+      #
+      # --compare-models, because the step below diffs the committed report and the report has a
+      # model-comparison section in it. Running the cheaper form here would regenerate a report
+      # missing that section and fail the diff on every build -- so the flag is not optional
+      # decoration, it is what makes "the committed report is reproducible" a checkable claim.
+      # It costs about a minute: MBG/NBD fits in under ten seconds and Pareto/NBD in twenty.
+      - name: Validate
+        run: uv run ltv validate --compare-models
+
+      # The reports and charts are committed, and `ltv validate` has just regenerated them from the
+      # data CI built itself. If they differ, either the committed report was produced from
+      # something other than the current code, or the pipeline is not reproducible -- both are
+      # failures, and both are invisible without this check. It is also what keeps the determinism
+      # rule in ltv/report.py honest rather than aspirational.
+      - name: Reports are reproducible
+        run: git diff --exit-code -- reports/
+
       # Runs the integration tests too, since the data is now present. Those assert the documented
       # row and customer counts, so a silently truncated download fails the build.
       - name: Test
