@@ -58,12 +58,45 @@ class ModelError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CalibrationFingerprint:
+    """A summary of the exact numbers a fit trained on, small enough to store beside its output.
+
+    This exists because restoring source is not restoring state. A mutation-testing run once left
+    ``int_customers__rfm_calibration`` materialised from mutated SQL while every file on disk was
+    clean, and the next fit trained on it happily. Nothing in the repo could see the difference,
+    because every check inspected source rather than the warehouse.
+
+    Recorded at fit time and re-derived from the warehouse afterwards, it turns "the predictions no
+    longer correspond to the data" from an invisible condition into a failing test. Sums rather than
+    a hash so that a mismatch says *which* quantity moved, and so the dbt-side recomputation is
+    ordinary readable SQL rather than an exercise in matching a serialisation byte for byte.
+    """
+
+    rows: int
+    sum_frequency: int
+    sum_recency: int
+    sum_customer_age: int
+    sum_monetary_value: float
+
+
+@dataclass(frozen=True)
 class CalibrationData:
     """Everything the models are fitted on, plus the window that defines it."""
 
     source: str
     customers: pd.DataFrame
     holdout_days: int
+
+    @property
+    def fingerprint(self) -> CalibrationFingerprint:
+        """Summarise the frame actually being fitted, not the relation it was meant to come from."""
+        return CalibrationFingerprint(
+            rows=len(self.customers),
+            sum_frequency=int(self.customers["frequency"].sum()),
+            sum_recency=int(self.customers["recency"].sum()),
+            sum_customer_age=int(self.customers["customer_age"].sum()),
+            sum_monetary_value=float(self.customers["monetary_value"].sum()),
+        )
 
     @property
     def eligible(self) -> pd.DataFrame:
