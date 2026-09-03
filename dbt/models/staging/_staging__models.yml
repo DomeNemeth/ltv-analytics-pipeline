@@ -34,3 +34,51 @@ models:
       - name: is_return
         description: Always false for CDNOW, which contains no returns.
         data_tests: [not_null]
+
+  # Tests on this model carry the `post_fit` tag explicitly rather than relying on dbt's indirect
+  # selection to infer it from the model. The default `ltv transform` runs
+  # `build --exclude tag:post_fit` against a warehouse that may have no `model` schema at all, and a
+  # test that slipped through the exclusion would fail on a missing relation for a model that was
+  # deliberately not built. Explicit beats inferred where the clean-clone path depends on it.
+  - name: stg_model__customer_predictions
+    description: >
+      The Phase 3 per-customer predictions, brought into the DAG so that scoring them is a tested
+      dbt model rather than an untested join. Rename and cast only; the grain is
+      (source, customer_id, horizon_days).
+    columns:
+      - name: source
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: customer_id
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: horizon_days
+        description: >
+          Days ahead this row forecasts. A column rather than a suffix on the value columns, so a
+          revenue number cannot be read without the window it applies to.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: expected_purchases
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: probability_alive
+        description: >
+          P(customer is still active) under BG/NBD. Exactly 1.0 for every customer with no repeat
+          purchase, by construction rather than by evidence -- see CLAUDE.md section 8.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: fit_method
+        description: >
+          `map` or `mcmc`. The interval columns are NULL on every MAP row, and this is what says why.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+          - accepted_values:
+              arguments:
+                values: ["map", "mcmc"]
+              config: {tags: [post_fit]}

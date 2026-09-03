@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -34,6 +35,9 @@ class Mutation:
     old: str
     new: str
     guard: str
+    #: Override the default checks. Only for defects that cannot show up without a more expensive
+    #: command -- a wrong fit-provenance record, for instance, does nothing until a fit writes one.
+    checks: tuple[str, ...] | None = None
 
     @property
     def file(self) -> Path:
@@ -167,28 +171,144 @@ MUTATIONS = (
         # dashboard would cover 40% of the customer base while looking complete.
         guard="test_customers_without_repeat_spend_get_the_population_estimate",
     ),
+    # Phase 4. These break the scoring rather than the modelling, which is the more dangerous half:
+    # a wrong model produces numbers someone might question, while wrong scoring produces numbers
+    # that make a wrong model look right. Note that `ltv transform` cannot see any of the SQL ones
+    # -- it excludes tag:post_fit -- so `ltv validate` is what has to catch them.
+    Mutation(
+        name="scored-population",
+        path="dbt/models/intermediate/int_customers__scored.sql",
+        old="    select * from {{ ref('int_customers__rfm_calibration') }}",
+        new=(
+            "    select * from {{ ref('int_customers__rfm_calibration') }}"
+            " where is_gamma_gamma_eligible"
+        ),
+        # Scores only the customers the spend model could be fitted on, dropping 14,120 of 23,570.
+        # A plausible edit -- "score the customers we can actually model" -- and a catastrophic one:
+        # the excluded group is 60% of the base and the part the model handles by population
+        # fallback, so every metric in the report improves at once.
+        #
+        # Note what this mutation replaced. The obvious candidate was turning the `actuals` join
+        # from `left` to `inner`, mirroring the Phase 2 defect. It was tried first and **survived**,
+        # for a good reason: assert_customer_populations_align already pins the holdout and
+        # calibration populations to the same set of keys, so at that join the two forms are
+        # equivalent and nothing downstream can tell them apart. The `left join` there is
+        # defensive, not load-bearing, and a mutation of it proves nothing about this guard.
+        guard="assert_scored_population_is_complete",
+    ),
+    Mutation(
+        name="scored-horizon",
+        path="dbt/models/intermediate/int_customers__scored.sql",
+        old="and predictions.horizon_days = windows.duration_holdout",
+        new="and predictions.horizon_days = 365",
+        # Scores the 365-day forecast against the 273-day outcome. Both horizons are real rows in
+        # the predictions table, so the join succeeds and every customer still gets exactly one
+        # prediction; the forecast is simply for the wrong window.
+        guard="assert_scored_horizon_matches_the_holdout_window",
+    ),
+    Mutation(
+        name="baseline-scale",
+        path="dbt/models/intermediate/int_customers__scored.sql",
+        # Single-line anchors throughout this file, deliberately. A multi-line `old` compares
+        # against bytes read with newline="" -- so it stops matching the moment the file is written
+        # with CRLF, which is exactly what happened here and reported the mutation as stale rather
+        # than as surviving. A one-line anchor cannot have that problem.
+        old="                * windows.duration_holdout",
+        new="                * 1.0",
+        # Drops the scaling to the holdout length, so the baseline predicts a per-day rate against a
+        # 273-day actual and comes out ~273x too low. The model would then "beat the baseline" by a
+        # margin nobody would question, which is exactly the wrong reason to believe a result.
+        guard="assert_baselines_use_only_calibration_inputs",
+    ),
+    Mutation(
+        name="carry-forward-baseline",
+        path="dbt/models/intermediate/int_customers__scored.sql",
+        old="    cast(calibration.frequency as double) as baseline_carry_forward,",
+        new="    cast(calibration.frequency as double) * 1.5 as baseline_carry_forward,",
+        # The fairest baseline in the report, and therefore the one whose corruption would flatter
+        # the model most. A validation audit found that the two rate baselines carried a hidden
+        # 273/229 inflation, which was worth roughly half the reported margin; this baseline exists
+        # to be the un-inflated comparand, so it needs a guard proving nothing can inflate it.
+        guard="assert_baselines_use_only_calibration_inputs",
+    ),
+    Mutation(
+        name="zero-baseline",
+        path="dbt/models/intermediate/int_customers__scored.sql",
+        old="    0.0 as baseline_zero",
+        new="    999.0 as baseline_zero",
+        # The MAE floor. If this is wrong, the report's "the model clears the all-zero rule by 2%"
+        # sentence becomes arbitrary, and per-customer MAE goes back to looking like accuracy.
+        guard="assert_baselines_use_only_calibration_inputs",
+    ),
+    Mutation(
+        name="mape-zeros",
+        path="src/ltv/models/metrics.py",
+        old="    defined = actual_values != 0",
+        new="    defined = actual_values == actual_values",
+        # Includes the customers whose actual is zero, making every percentage error infinite -- or,
+        # with a different formulation, quietly enormous. The failure mode this guards is not the
+        # NaN; it is a MAPE reported for a population it does not describe.
+        guard="test_mape_excludes_zero_actuals_and_says_how_many",
+    ),
+    Mutation(
+        name="stale-fit",
+        path="src/ltv/models/store.py",
+        old='"calibration_rows": [fingerprint.rows],',
+        new='"calibration_rows": [0],',
+        # The freshness guard's own guard. A fit that misrecords what it trained on cannot detect
+        # that the warehouse moved underneath it, and the whole point of fit_runs is to make that
+        # detectable. Needs `ltv fit` to run: the row is only written at fit time, so a validate
+        # against the previous run's honest row would pass and the mutation would look survivable.
+        checks=("ltv transform", "ltv fit", "ltv validate", "pytest"),
+        guard="assert_predictions_match_the_current_calibration_inputs",
+    ),
 )
 
-CHECKS = (
-    ("ltv transform", ("uv", "run", "ltv", "transform")),
-    ("pytest", ("uv", "run", "pytest", "-q")),
-)
+#: Every check the harness can run, in the order a real user would.
+#:
+#: `ltv validate` earns its place because `ltv transform` deliberately excludes `tag:post_fit`, so
+#: the scoring model and its four tests are invisible to it. Without this entry, a mutation to
+#: int_customers__scored would survive the whole harness while looking thoroughly checked.
+#:
+#: `ltv fit` is not run by default -- it is 30 seconds against everything else's five -- but a
+#: mutation can opt into it by name when the defect only materialises at fit time.
+CHECKS = {
+    "ltv transform": ("uv", "run", "ltv", "transform"),
+    "ltv fit": ("uv", "run", "ltv", "fit"),
+    "ltv validate": ("uv", "run", "ltv", "validate"),
+    "pytest": ("uv", "run", "pytest", "-q"),
+}
+
+DEFAULT_CHECKS = ("ltv transform", "ltv validate", "pytest")
+
+#: What regenerates the *committed* reports and charts. Deliberately not the same command as the
+#: `ltv validate` check above: the committed report has a model-comparison section in it, so a plain
+#: validate rebuilds the numbers correctly and still leaves a report missing a section. Run once
+#: at the end of a run rather than after every mutation -- per-mutation rebuilds only need to
+#: remove the poison, and paying 35 seconds of challenger fitting nineteen times to do it would add
+#: ten minutes for no extra safety.
+FINAL_REBUILD = ("uv", "run", "ltv", "validate", "--compare-models")
 
 
-def run_checks() -> list[str]:
-    """Return the names of the checks that failed."""
+def run_checks(names: Sequence[str]) -> list[str]:
+    """Run the named checks in order, returning the names of those that failed.
+
+    Every check runs even after one fails, because which of them notices is the interesting part.
+    A mutation caught only by `pytest` and not by `ltv transform` says something specific about
+    where the guard lives.
+    """
     failed = []
-    for name, command in CHECKS:
+    for name in names:
         completed = subprocess.run(  # noqa: S603
-            command, cwd=REPO_ROOT, capture_output=True, text=True
+            CHECKS[name], cwd=REPO_ROOT, capture_output=True, text=True
         )
         if completed.returncode != 0:
             failed.append(name)
     return failed
 
 
-def _rebuild_warehouse() -> None:
-    """Rebuild the warehouse from the restored source, so no mutation outlives its own run.
+def _rebuild_state(mutation: Mutation) -> None:
+    """Rebuild everything downstream of the restored source, so no mutation outlives its own run.
 
     Restoring the *file* is not enough, and assuming it was cost this project a corrupted fit.
     A mutation that changes SQL leaves the warehouse **materialised from the mutated model** once
@@ -201,13 +321,26 @@ def _rebuild_warehouse() -> None:
     predictions table that looked entirely normal. Nothing in the repo could have noticed, because
     every check here inspects source rather than state.
 
-    Rebuilding in the `finally` costs a few seconds per mutation and makes the failure impossible
-    rather than unlikely. It runs on interrupt too, which is when a half-finished run is most likely
-    to leave something behind.
+    Phase 4 widened the blast radius, so this now rebuilds three kinds of state rather than one:
+
+    * the **warehouse**, as before;
+    * the **fitted models and their provenance row**, but only for a mutation that ran `ltv fit`
+      -- a poisoned fit_runs row would otherwise fail the freshness guard on every later mutation
+      and report a cascade of false catches;
+    * the **committed reports and charts**, which `ltv validate` writes. A mutated run leaves
+      reports/ holding numbers computed from broken code, and those files are tracked. Regenerating
+      them here is the difference between a clean `git status` and a plausible-looking wrong report
+      sitting in the working tree waiting to be committed.
     """
-    subprocess.run(  # noqa: S603
-        ("uv", "run", "ltv", "transform"), cwd=REPO_ROOT, capture_output=True, text=True
-    )
+    steps = ["ltv transform"]
+    if "ltv fit" in (mutation.checks or ()):
+        steps.append("ltv fit")
+    steps.append("ltv validate")
+
+    for name in steps:
+        subprocess.run(  # noqa: S603
+            CHECKS[name], cwd=REPO_ROOT, capture_output=True, text=True
+        )
 
 
 def check_mutation(mutation: Mutation) -> bool:
@@ -227,10 +360,10 @@ def check_mutation(mutation: Mutation) -> bool:
     mutated = original.replace(mutation.old, mutation.new)
     try:
         mutation.file.write_text(mutated, encoding="utf-8", newline="")
-        failed = run_checks()
+        failed = run_checks(mutation.checks or DEFAULT_CHECKS)
     finally:
         mutation.file.write_text(original, encoding="utf-8", newline="")
-        _rebuild_warehouse()
+        _rebuild_state(mutation)
 
     if failed:
         print(f"  caught by: {', '.join(failed)}")
@@ -252,11 +385,21 @@ def main() -> int:
     subprocess.run(("git", "diff", "--quiet"), cwd=REPO_ROOT, check=False)
 
     survivors = []
-    for mutation in selected:
-        print(f"\n{mutation.name}: {mutation.path}")
-        print(f"  expecting {mutation.guard}")
-        if not check_mutation(mutation):
-            survivors.append(mutation)
+    try:
+        for mutation in selected:
+            print(f"\n{mutation.name}: {mutation.path}")
+            print(f"  expecting {mutation.guard}")
+            if not check_mutation(mutation):
+                survivors.append(mutation)
+    finally:
+        # Leave the working tree holding the reports a normal run produces, not the reduced ones
+        # the per-mutation rebuild writes. Without this the harness ends with a committed report
+        # whose model-comparison section reads "Not run" -- accurate for the command that wrote it,
+        # wrong for the repo, and a diff that looks like a deliberate change. In the `finally` for
+        # the same reason everything else here is: an interrupted run is when a half-restored tree
+        # is most likely to be left behind and least likely to be noticed.
+        print("\nregenerating committed reports ...")
+        subprocess.run(FINAL_REBUILD, cwd=REPO_ROOT, capture_output=True, text=True)  # noqa: S603
 
     print(f"\n{len(selected) - len(survivors)}/{len(selected)} mutations caught")
     for mutation in survivors:

@@ -148,6 +148,90 @@ models:
         description: Length of the holdout window in days, carried through for rate-based scoring.
         data_tests: [not_null]
 
+  # As with the staging model it reads, every test here is tagged `post_fit` explicitly so that the
+  # default `ltv transform` excludes it along with the model. Nothing in this block can run before
+  # `ltv fit` has written the predictions table.
+  - name: int_customers__scored
+    description: >
+      One row per calibration customer: the model's prediction, the customer's actual holdout
+      behaviour, two naive baselines, and the calibration features all three are conditioned on.
+      What `ltv validate` computes its metrics from, and what the Phase 5 marts read.
+    columns:
+      - name: customer_id
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: source
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: horizon_days
+        description: >
+          Always equal to duration_holdout -- the predictions join selects the horizon that matches
+          the scoring window rather than a literal. Pinned by
+          assert_scored_horizon_matches_the_holdout_window.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: holdout_frequency
+        description: >
+          Ground truth: every occasion in the holdout window. Not coalesced to zero here -- the model
+          it comes from already emits a real zero for customers who did not return, so a NULL at this
+          point means a row went missing in the join, which is a different problem and must fail.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: expected_purchases
+        description: >
+          The model's forecast over duration_holdout days. NULL would mean this customer has no
+          prediction at the scoring horizon, i.e. the fit and the window have come apart.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_purchases
+        description: >
+          Naive rule: the customer keeps repeating at their calibration rate, scaled to the holdout
+          length. Calibration inputs only -- see assert_baselines_use_only_calibration_inputs.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_purchases_flat
+        description: >
+          Naive rule with no customer-level information at all: the population repeat rate scaled to
+          the holdout length. The floor a model must clear to have learned anything.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_avg_value
+        description: >
+          Past average repeat order value, with the population mean for those who have none.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_revenue_flat
+        description: >
+          Population repeat rate times population mean order value. Reported in the reference table,
+          so it is guarded -- it spent one commit being quoted with no test at all, which is the
+          shape of the Phase 2 finding about unguarded holdout money.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_carry_forward
+        description: >
+          Naive rule with no rescaling: you repeat as often next window as you did last window.
+          Valid here only because the two windows are the same length, which is also what makes it
+          the fairest comparison available -- the rate baselines inflate by holdout/customer_age.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_zero
+        description: >
+          Predict that nobody buys anything. The floor per-customer MAE is really measured against
+          on a quantity where 70% of actuals are zero.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+
   - name: int_cohorts__monthly_retention
     description: >
       Acquisition-cohort retention by month. Three cohorts on CDNOW, which is a property of the
