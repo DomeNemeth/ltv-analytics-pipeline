@@ -1215,6 +1215,7 @@ dependencies = [
     { name = "pyarrow" },
     { name = "pydantic-settings" },
     { name = "pymc-marketing" },
+    { name = "scipy" },
     { name = "truststore" },
     { name = "typer" },
 ]
@@ -1240,6 +1241,7 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=17" },
     { name = "pydantic-settings", specifier = ">=2.5" },
     { name = "pymc-marketing", specifier = ">=0.10" },
+    { name = "scipy", specifier = ">=1.14" },
     { name = "truststore", specifier = ">=0.10.4" },
     { name = "typer", specifier = ">=0.12" },
 ]
