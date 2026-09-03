@@ -133,5 +133,67 @@ def fit(
         )
 
 
+@app.command()
+def validate(
+    source: str = typer.Option(
+        "cdnow", help="Which dataset to validate. Sources score separately."
+    ),
+    compare_models: bool = typer.Option(
+        False,
+        "--compare-models",
+        help="Also fit MBG/NBD and Pareto/NBD on the same calibration frame and compare them. "
+        "Slower, and the answer to whether the error is this model's assumptions or the data's.",
+    ),
+) -> None:
+    """Score the fitted predictions against the holdout window and write the validation report."""
+    # Lazy, for the same reason `fit` is: this pulls matplotlib and (with --compare-models) PyMC,
+    # and paying seconds of import on `ltv info` would make the whole CLI feel broken.
+    from ltv.transform import TransformError
+    from ltv.validate import ValidationError, run_validation
+
+    try:
+        result = run_validation(source, compare_models=compare_models, settings=get_settings())
+    except (ValidationError, TransformError, FileNotFoundError) as exc:
+        typer.secho(str(exc), fg=typer.colors.RED, err=True)
+        raise typer.Exit(code=1) from exc
+
+    purchases = result.score("bg_nbd", "purchases")
+    # The same-period rule, not the calibration-rate one. The rate baselines divide by each
+    # customer's observation length and multiply by the holdout length, which inflates them
+    # whenever mean customer age is below the holdout -- echoing one of those beside the model
+    # overstates the win, which is exactly what a validation audit caught this command doing.
+    baseline = result.score("baseline_carry_forward", "purchases")
+    floor = result.score("baseline_zero", "purchases")
+
+    typer.echo(f"validated {result.source} ({result.fit_method})")
+    typer.echo(f"  customers        {result.customers:,}")
+    typer.echo(f"  horizon          {result.horizon_days}d (the holdout window)")
+
+    if purchases and baseline:
+        typer.echo(
+            f"  purchases        {purchases.aggregate.predicted_total:,.0f} predicted vs "
+            f"{purchases.aggregate.actual_total:,.0f} actual "
+            f"({purchases.aggregate.percent_error:+.1f}%)"
+        )
+        # The baseline is echoed beside the model on purpose. An error number without something to
+        # beat is not a result, and printing only the model's is how it becomes one by accident.
+        floor_note = f", {floor.mae:.3f} predicting nobody buys" if floor else ""
+        typer.echo(
+            f"  MAE per customer {purchases.mae:.3f} model vs {baseline.mae:.3f} naive "
+            f"(same as last window){floor_note}"
+        )
+
+    for fit in result.challengers:
+        status = f"fitted in {fit.seconds:.0f}s" if fit.succeeded else f"FAILED -- {fit.error}"
+        typer.echo(f"  {fit.family:<16} {status}")
+
+    typer.echo(f"  metrics          {result.metrics_written:,} rows in model.validation_metrics")
+    typer.echo(f"  report           {result.report_path.name}")
+    typer.echo(f"  charts           {', '.join(path.name for path in result.chart_paths)}")
+
+    if result.fit_method == "map":
+        typer.echo("  note             MAP fit: no uncertainty intervals in these metrics.")
+
+
 if __name__ == "__main__":
     app()
