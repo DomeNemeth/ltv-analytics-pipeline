@@ -70,6 +70,13 @@ class CalibrationFingerprint:
     longer correspond to the data" from an invisible condition into a failing test. Sums rather than
     a hash so that a mismatch says *which* quantity moved, and so the dbt-side recomputation is
     ordinary readable SQL rather than an exercise in matching a serialisation byte for byte.
+
+    Plain sums miss one failure: the right values attached to the wrong customers. The Phase 4
+    audit shifted every customer's features by one row on a copy of the warehouse. That changed
+    frequency for 13,943 customers and left every sum untouched. The ``weighted_*`` sums weight
+    each customer by their rank in ``customer_id`` order, so moving a value to a different
+    customer moves the total. Rank rather than the id itself because ids need not be numeric,
+    and both sides can rank identically.
     """
 
     rows: int
@@ -77,6 +84,35 @@ class CalibrationFingerprint:
     sum_recency: int
     sum_customer_age: int
     sum_monetary_value: float
+    weighted_frequency: int
+    weighted_recency: int
+    weighted_customer_age: int
+    weighted_monetary_value: float
+
+
+@dataclass(frozen=True)
+class PredictionFingerprint:
+    """A summary of the predictions a fit wrote, so edits made after the fit are detectable.
+
+    The calibration fingerprint says the *inputs* have not moved since the fit. It says nothing
+    about the output. The Phase 4 audit multiplied every prediction by 1.167 on a copy of the
+    warehouse and got a 0% holdout error, with every post-fit guard green. Summed across all
+    horizons, and rank-weighted in the same way as the calibration sums, so both scaling and
+    reassignment between customers change a recorded number.
+    """
+
+    sum_expected_purchases: float
+    weighted_expected_purchases: float
+    sum_expected_forward_revenue: float
+
+    @classmethod
+    def of(cls, predictions: pd.DataFrame) -> PredictionFingerprint:
+        rank = predictions["customer_id"].rank(method="dense")
+        return cls(
+            sum_expected_purchases=float(predictions["expected_purchases"].sum()),
+            weighted_expected_purchases=float((rank * predictions["expected_purchases"]).sum()),
+            sum_expected_forward_revenue=float(predictions["expected_forward_revenue"].sum()),
+        )
 
 
 @dataclass(frozen=True)
@@ -90,12 +126,19 @@ class CalibrationData:
     @property
     def fingerprint(self) -> CalibrationFingerprint:
         """Summarise the frame actually being fitted, not the relation it was meant to come from."""
+        customers = self.customers
+        # Ranked rather than positional, so the weights do not depend on the frame's row order.
+        rank = customers["customer_id"].rank(method="first").astype("int64")
         return CalibrationFingerprint(
-            rows=len(self.customers),
-            sum_frequency=int(self.customers["frequency"].sum()),
-            sum_recency=int(self.customers["recency"].sum()),
-            sum_customer_age=int(self.customers["customer_age"].sum()),
-            sum_monetary_value=float(self.customers["monetary_value"].sum()),
+            rows=len(customers),
+            sum_frequency=int(customers["frequency"].sum()),
+            sum_recency=int(customers["recency"].sum()),
+            sum_customer_age=int(customers["customer_age"].sum()),
+            sum_monetary_value=float(customers["monetary_value"].sum()),
+            weighted_frequency=int((rank * customers["frequency"]).sum()),
+            weighted_recency=int((rank * customers["recency"]).sum()),
+            weighted_customer_age=int((rank * customers["customer_age"]).sum()),
+            weighted_monetary_value=float((rank * customers["monetary_value"].astype(float)).sum()),
         )
 
     @property

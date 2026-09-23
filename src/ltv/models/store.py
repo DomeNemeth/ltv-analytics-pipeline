@@ -21,7 +21,7 @@ from ltv.config import Settings, get_settings
 from ltv.warehouse import connect
 
 if TYPE_CHECKING:  # pragma: no cover - avoids importing the model layer to write a row
-    from ltv.models.clv import CalibrationFingerprint
+    from ltv.models.clv import CalibrationFingerprint, PredictionFingerprint
 
 #: Schema for anything written by Python rather than dbt. Kept separate from `main` (dbt's models)
 #: and `raw` (ingest) so the warehouse itself shows which stage produced a relation.
@@ -142,6 +142,7 @@ def write_fit_run(
     horizons: tuple[int, ...],
     holdout_days: int,
     fingerprint: CalibrationFingerprint,
+    predictions: PredictionFingerprint,
     settings: Settings | None = None,
 ) -> None:
     """Record what this fit trained on, beside what it produced.
@@ -169,6 +170,13 @@ def write_fit_run(
             "sum_recency": [fingerprint.sum_recency],
             "sum_customer_age": [fingerprint.sum_customer_age],
             "sum_monetary_value": [fingerprint.sum_monetary_value],
+            "weighted_frequency": [fingerprint.weighted_frequency],
+            "weighted_recency": [fingerprint.weighted_recency],
+            "weighted_customer_age": [fingerprint.weighted_customer_age],
+            "weighted_monetary_value": [fingerprint.weighted_monetary_value],
+            "sum_expected_purchases": [predictions.sum_expected_purchases],
+            "weighted_expected_purchases": [predictions.weighted_expected_purchases],
+            "sum_expected_forward_revenue": [predictions.sum_expected_forward_revenue],
         }
     )
 

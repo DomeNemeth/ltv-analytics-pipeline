@@ -23,6 +23,17 @@ with recorded as (
 
 ),
 
+ranked as (
+
+    -- The rank that weights each customer. It must match the Python side
+    -- (CalibrationFingerprint), which ranks by customer_id within one source's frame.
+    select
+        *,
+        row_number() over (partition by source order by customer_id) as customer_rank
+    from {{ ref('int_customers__rfm_calibration') }}
+
+),
+
 current_inputs as (
 
     select
@@ -31,9 +42,16 @@ current_inputs as (
         sum(frequency) as sum_frequency,
         sum(recency) as sum_recency,
         sum(customer_age) as sum_customer_age,
-        cast(sum(monetary_value) as double) as sum_monetary_value
+        cast(sum(monetary_value) as double) as sum_monetary_value,
 
-    from {{ ref('int_customers__rfm_calibration') }}
+        -- Rank-weighted, so the right values attached to the wrong customers move the total.
+        -- Plain sums are blind to that. Proven on a copy of the warehouse during the Phase 4 audit.
+        sum(customer_rank * frequency) as weighted_frequency,
+        sum(customer_rank * recency) as weighted_recency,
+        sum(customer_rank * customer_age) as weighted_customer_age,
+        sum(customer_rank * cast(monetary_value as double)) as weighted_monetary_value
+
+    from ranked
     group by source
 
 )
@@ -63,3 +81,9 @@ where recorded.source is null
     -- Tolerance covers the difference between a float64 sum in pandas and a decimal sum in DuckDB
     -- over 23,570 rows, which is around 1e-9. Any real change to spend is cents at minimum.
     or abs(recorded.sum_monetary_value - current_inputs.sum_monetary_value) > 0.01
+    or recorded.weighted_frequency != current_inputs.weighted_frequency
+    or recorded.weighted_recency != current_inputs.weighted_recency
+    or recorded.weighted_customer_age != current_inputs.weighted_customer_age
+    -- Rank weights reach 23,570, so float noise is larger here than in the plain sum, but still
+    -- around 1e-6. The smallest real change is one cent on the lowest-ranked customer: 0.01.
+    or abs(recorded.weighted_monetary_value - current_inputs.weighted_monetary_value) > 0.01

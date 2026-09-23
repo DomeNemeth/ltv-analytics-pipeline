@@ -13,6 +13,7 @@ from pathlib import Path
 from ltv.config import Settings, get_settings
 from ltv.models.clv import (
     CalibrationData,
+    PredictionFingerprint,
     check_assumptions,
     fit_models,
     load_calibration,
@@ -86,6 +87,7 @@ def run_fit(
         horizons=horizons,
         holdout_days=data.holdout_days,
         fingerprint=data.fingerprint,
+        predictions=PredictionFingerprint.of(predictions),
         settings=settings,
     )
 
