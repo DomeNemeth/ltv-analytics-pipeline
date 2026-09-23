@@ -262,6 +262,59 @@ MUTATIONS = (
         checks=("ltv transform", "ltv fit", "ltv validate", "pytest"),
         guard="assert_predictions_match_the_current_calibration_inputs",
     ),
+    # --- Added after the Phase 4 audit, one per guard it showed was missing or could not fail.
+    Mutation(
+        name="recent-baseline-leak",
+        path="dbt/macros/recent_repeats.sql",
+        old="and occasions.order_date <= windows.calibration_end",
+        new="and occasions.order_date <= windows.holdout_end",
+        # The recent-rate rule is the one naive rule that beats the model on the total. If it could
+        # read holdout purchases, its win would be cheating, and the report would say the model
+        # lost to a rule that saw the answer.
+        guard="assert_baselines_use_only_calibration_inputs (independent recomputation)",
+    ),
+    Mutation(
+        name="recent-baseline-population",
+        path="dbt/macros/recent_repeats.sql",
+        old="    left join {{ ref('int_customers__purchase_occasions') }} as occasions",
+        new="    inner join {{ ref('int_customers__purchase_occasions') }} as occasions",
+        # Drops every customer with no recent repeat from the rule. Their contribution is zero, so
+        # the predicted total barely moves. Only a population count can see it.
+        guard="assert_recent_window_sensitivity_is_complete",
+    ),
+    Mutation(
+        name="baseline-null",
+        path="dbt/models/intermediate/int_customers__scored.sql",
+        old="    end as baseline_revenue_recent,",
+        new="    end + cast(null as double) as baseline_revenue_recent,",
+        # The audit nulled baseline columns on a copy of the warehouse and every guard passed: no
+        # not_null, and a comparison that read NULL as "no difference". Both are fixed.
+        guard="not_null on baseline_revenue_recent, and the NULL-safe baseline comparison",
+    ),
+    Mutation(
+        name="predictions-edited-after-fit",
+        path="src/ltv/models/store.py",
+        old="        return _replace_rows_for_sources(connection, PREDICTIONS_TABLE, predictions)",
+        new=(
+            "        return _replace_rows_for_sources(connection, PREDICTIONS_TABLE, "
+            "predictions.assign(expected_purchases=predictions['expected_purchases'] * 1.167))"
+        ),
+        # The table no longer holds what the fit computed, which is the audit's M4: scaled
+        # predictions scored a 0% error with every guard green. Needs `ltv fit` to write them.
+        checks=("ltv transform", "ltv fit", "ltv validate", "pytest"),
+        guard="assert_predictions_are_the_ones_the_fit_wrote",
+    ),
+    Mutation(
+        name="weighted-provenance",
+        path="src/ltv/models/store.py",
+        old='"weighted_frequency": [fingerprint.weighted_frequency],',
+        new='"weighted_frequency": [fingerprint.sum_frequency],',
+        # Proves the rank-weighted comparison in the staleness guard is live, not decorative.
+        # tests/test_fingerprint.py proves the weighted sums move when features rotate between
+        # customers; this proves the dbt guard actually compares them.
+        checks=("ltv transform", "ltv fit", "ltv validate", "pytest"),
+        guard="assert_predictions_match_the_current_calibration_inputs (weighted sums)",
+    ),
 )
 
 #: Every check the harness can run, in the order a real user would.
