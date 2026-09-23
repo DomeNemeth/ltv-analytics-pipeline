@@ -21,8 +21,9 @@ Three things about the design are deliberate:
   would be a second thing to keep in agreement, which is the failure mode section 9 exists to warn
   about. What is checked here instead is the precondition that relation cannot express: whether
   there is anything to validate at all.
-* **Every number is reported for the model and for two naive rules.** "The model beat nothing" is
-  not a result.
+* **Every number is reported for the model and for several naive rules.** "The model beat nothing"
+  is not a result. One of them, the recent-run-rate rule, beats the model on the aggregate total,
+  and the report says so rather than leaving it out.
 """
 
 from __future__ import annotations
@@ -48,6 +49,10 @@ from ltv.warehouse import connect
 #: is read, so the numbers in a report always describe the warehouse as it stands.
 SCORED_RELATION = "int_customers__scored"
 
+#: The recent-run-rate baseline at several look-back windows, so a reader can see that the window
+#: the tables use was not chosen for its result.
+SENSITIVITY_RELATION = "int_baselines__recent_window_sensitivity"
+
 #: Calibration repeat-count buckets for the canonical actual-versus-predicted table. The open-ended
 #: top bucket follows the published CDNOW analysis, which reports "0, 1, ..., 7+", so the two tables
 #: can be read side by side.
@@ -63,6 +68,7 @@ SCORED_QUANTITIES: tuple[tuple[str, str, dict[str, str]], ...] = (
         "holdout_frequency",
         {
             CHAMPION: "expected_purchases",
+            "baseline_recent": "baseline_recent",
             "baseline_carry_forward": "baseline_carry_forward",
             "baseline_rate": "baseline_purchases",
             "baseline_flat": "baseline_purchases_flat",
@@ -74,6 +80,7 @@ SCORED_QUANTITIES: tuple[tuple[str, str, dict[str, str]], ...] = (
         "holdout_spend",
         {
             CHAMPION: "expected_forward_revenue",
+            "baseline_recent": "baseline_revenue_recent",
             "baseline_carry_forward": "baseline_revenue_carry_forward",
             "baseline_rate": "baseline_revenue",
             "baseline_flat": "baseline_revenue_flat",
@@ -145,6 +152,40 @@ class BenchmarkComparison:
 
 
 @dataclass(frozen=True)
+class IntervalSummary:
+    """What a ``--full-bayes`` run's intervals look like, computed from the table every time.
+
+    These figures used to be typed into the report as fixed text, copied from one full-Bayes run.
+    Any later run would have printed them without computing them. They are now derived from
+    whatever intervals the predictions table holds, or reported as absent when it holds none.
+    """
+
+    customers: int
+    #: Interval width as a fraction of the point estimate, across customers.
+    median_relative_width: float
+    p5_relative_width: float
+    p95_relative_width: float
+    #: Share of customers whose realised holdout spend falls inside their own interval.
+    coverage: float
+
+
+@dataclass(frozen=True)
+class LowestDecile:
+    """Who sits in the lowest-predicted tenth, and what they did.
+
+    The report used to explain decile 10's inversion as mostly one-time buyers told apart only by
+    customer age. The Phase 4 audit found it is 45% repeat buyers. This computes the composition
+    so the explanation follows the data.
+    """
+
+    customers: int
+    repeat_buyers: int
+    repeat_mean_probability_alive: float
+    repeat_mean_actual: float
+    one_time_mean_actual: float
+
+
+@dataclass(frozen=True)
 class ValidationResult:
     """What a validation run established, in the terms a reader needs to judge it."""
 
@@ -167,6 +208,17 @@ class ValidationResult:
     report_path: Path
     chart_paths: tuple[Path, ...]
     metrics_written: int
+    #: Look-back length of the recent-run-rate baseline, read from the scored relation.
+    recent_window_days: int = 0
+    #: That baseline totalled at several windows: window_days, predicted_purchases, percent_error.
+    recent_sensitivity: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: Mean customer_age at the cutoff, the exposure the calibration-average rules are built on.
+    mean_customer_age: float = float("nan")
+    lowest_decile: LowestDecile | None = None
+    intervals: IntervalSummary | None = None
+    #: Holdout returners with no calibration repeat. The spend model and the naive order-value rule
+    #: give them the identical population mean, so they dilute that comparison.
+    order_value_shared_estimate: int = 0
     challengers: tuple[ChallengerFit, ...] = field(default_factory=tuple)
 
     def score(self, family: str, quantity: str) -> Score | None:
@@ -224,10 +276,72 @@ def load_scored(source: str, settings: Settings | None = None) -> pd.DataFrame:
 
     # decimal columns arrive as Decimal objects, which numpy cannot do arithmetic on. Cast once here
     # rather than letting a dtype error surface from inside a metric.
-    for column in ("monetary_value", "holdout_spend", "holdout_monetary_value"):
+    for column in (
+        "monetary_value",
+        "holdout_spend",
+        "holdout_monetary_value",
+        "forward_revenue_hdi_low",
+        "forward_revenue_hdi_high",
+    ):
         frame[column] = frame[column].astype(float)
 
     return frame
+
+
+def load_sensitivity(source: str, settings: Settings | None = None) -> pd.DataFrame:
+    """The recent-run-rate baseline's holdout total at each look-back window, shortest first."""
+    settings = settings or get_settings()
+    with connect(settings, read_only=True) as connection:
+        return connection.execute(
+            f"select window_days, predicted_purchases, percent_error from {SENSITIVITY_RELATION} "
+            f"where source = ? order by window_days",
+            [source],
+        ).df()
+
+
+def interval_summary(frame: pd.DataFrame) -> IntervalSummary | None:
+    """Summarise the forward-revenue intervals, or return None when the fit produced none.
+
+    Scored on the holdout-horizon rows, against realised holdout spend. That is the one place an
+    interval can be checked against an outcome. Customers with a zero point estimate are left out of
+    the width figures, where a relative width is undefined, but not out of coverage.
+    """
+    low, high = frame["forward_revenue_hdi_low"], frame["forward_revenue_hdi_high"]
+    present = low.notna() & high.notna()
+    if not present.any():
+        return None
+
+    rows = frame[present]
+    width = (rows["forward_revenue_hdi_high"] - rows["forward_revenue_hdi_low"]).astype(float)
+    estimate = rows["expected_forward_revenue"].astype(float)
+    relative = (width / estimate)[estimate > 0]
+    spend = rows["holdout_spend"].astype(float)
+    inside = (spend >= rows["forward_revenue_hdi_low"]) & (
+        spend <= rows["forward_revenue_hdi_high"]
+    )
+
+    return IntervalSummary(
+        customers=len(rows),
+        median_relative_width=float(relative.median()),
+        p5_relative_width=float(relative.quantile(0.05)),
+        p95_relative_width=float(relative.quantile(0.95)),
+        coverage=float(inside.mean()),
+    )
+
+
+def lowest_decile(frame: pd.DataFrame) -> LowestDecile:
+    """Describe the lowest-predicted tenth, using the decile table's own assignment."""
+    deciles = metrics.assign_deciles(frame["expected_forward_revenue"], frame["customer_id"])
+    bottom = frame[deciles == deciles.max()]
+    repeat = bottom[bottom["frequency"] > 0]
+    one_time = bottom[bottom["frequency"] == 0]
+    return LowestDecile(
+        customers=len(bottom),
+        repeat_buyers=len(repeat),
+        repeat_mean_probability_alive=float(repeat["probability_alive"].mean()),
+        repeat_mean_actual=float(repeat["holdout_spend"].mean()),
+        one_time_mean_actual=float(one_time["holdout_spend"].mean()),
+    )
 
 
 def score(
@@ -527,6 +641,14 @@ def run_validation(
         benchmark=benchmark_comparison(purchase_model, len(frame)),
         calibration_fit=calibration_fit(purchase_model, frame),
         alive_tautology=alive_tautology(frame),
+        recent_window_days=int(frame["recent_window_days"].iloc[0]),
+        recent_sensitivity=load_sensitivity(source, settings),
+        mean_customer_age=float(frame["customer_age"].mean()),
+        lowest_decile=lowest_decile(frame),
+        intervals=interval_summary(frame),
+        order_value_shared_estimate=int(
+            ((frame["holdout_frequency"] > 0) & (frame["frequency"] == 0)).sum()
+        ),
         challengers=challengers,
         report_path=settings.reports_dir / f"validation_{source}.md",
         chart_paths=(),

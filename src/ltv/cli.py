@@ -158,10 +158,10 @@ def validate(
         raise typer.Exit(code=1) from exc
 
     purchases = result.score("bg_nbd", "purchases")
-    # The same-period rule, not the calibration-rate one. The rate baselines divide by each
-    # customer's observation length and multiply by the holdout length, which inflates them
-    # whenever mean customer age is below the holdout -- echoing one of those beside the model
-    # overstates the win, which is exactly what a validation audit caught this command doing.
+    # The recent-rate rule for the total, because it is the naive rule closest to the actual total
+    # and so the one the model has to be compared with. Echoing a weaker rule overstates the win.
+    # A validation audit has caught this command doing that twice.
+    recent = result.score("baseline_recent", "purchases")
     baseline = result.score("baseline_carry_forward", "purchases")
     floor = result.score("baseline_zero", "purchases")
 
@@ -175,6 +175,12 @@ def validate(
             f"{purchases.aggregate.actual_total:,.0f} actual "
             f"({purchases.aggregate.percent_error:+.1f}%)"
         )
+        if recent:
+            typer.echo(
+                f"  naive, recent    {recent.aggregate.predicted_total:,.0f} predicted "
+                f"({recent.aggregate.percent_error:+.1f}%) at the last "
+                f"{result.recent_window_days}d rate"
+            )
         # The baseline is echoed beside the model on purpose. An error number without something to
         # beat is not a result, and printing only the model's is how it becomes one by accident.
         floor_note = f", {floor.mae:.3f} predicting nobody buys" if floor else ""

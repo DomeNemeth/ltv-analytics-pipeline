@@ -20,6 +20,8 @@ import pytest
 
 from ltv.config import Settings, get_settings
 from ltv.models.challengers import CHAMPION
+from ltv.models.metrics import decile_table
+from ltv.report import bucket_misses
 from ltv.validate import (
     NO_MAPE,
     SCORED_RELATION,
@@ -28,7 +30,9 @@ from ltv.validate import (
     bucket_label,
     bucket_table,
     independence_check,
+    interval_summary,
     load_scored,
+    lowest_decile,
     metrics_frame,
     score_all,
 )
@@ -59,6 +63,11 @@ SCORED_COLUMNS = (
     "baseline_carry_forward",
     "baseline_revenue_carry_forward",
     "baseline_zero",
+    "recent_window_days",
+    "baseline_recent",
+    "baseline_revenue_recent",
+    "forward_revenue_hdi_low",
+    "forward_revenue_hdi_high",
     "spend_estimate_source",
     "fit_method",
 )
@@ -102,10 +111,15 @@ def synthetic_scored(n: int = 40, seed: int = 11) -> pd.DataFrame:
             "baseline_avg_value": rng.gamma(3.0, 10.0, n),
             "baseline_revenue": rng.gamma(2.0, 20.0, n),
             "baseline_revenue_flat": 26.0,
-            # The same-period rule: no rescaling, because both windows are the same length. It is
-            # the honest comparand -- the rate baselines above inflate by holdout/customer_age.
+            # The same-period rule: last window's count, unscaled.
             "baseline_carry_forward": frequency.astype(float),
             "baseline_revenue_carry_forward": frequency * monetary_value,
+            "recent_window_days": 91,
+            "baseline_recent": rng.gamma(2.0, 0.3, n),
+            "baseline_revenue_recent": rng.gamma(2.0, 15.0, n),
+            # MAP: no intervals, which is what every committed run holds.
+            "forward_revenue_hdi_low": np.nan,
+            "forward_revenue_hdi_high": np.nan,
             # The MAE floor on a mostly-zero quantity.
             "baseline_zero": 0.0,
             "spend_estimate_source": "conditional",
@@ -185,25 +199,6 @@ def test_the_all_zero_floor_is_scored_so_mae_cannot_be_read_as_accuracy() -> Non
     assert zero.mae == pytest.approx(frame["holdout_frequency"].mean())
 
 
-def test_the_same_period_baseline_is_not_rescaled() -> None:
-    """The fair comparand: both windows are the same length, so no scaling belongs in it.
-
-    `baseline_purchases` divides by each customer's observation length and multiplies by the holdout
-    length, which inflates it whenever mean customer age is below the holdout length -- on CDNOW by
-    a factor of 1.19, which was worth roughly half the model's apparent margin. This one must stay
-    equal to the raw calibration count.
-    """
-    frame = synthetic_scored()
-
-    np.testing.assert_allclose(frame["baseline_carry_forward"], frame["frequency"].astype(float))
-
-    scores = score_all(frame)
-    carry = next(
-        s for s in scores if s.family == "baseline_carry_forward" and s.quantity == "purchases"
-    )
-    assert carry.aggregate.predicted_total == pytest.approx(frame["frequency"].sum())
-
-
 def test_challenger_predictions_are_scored_on_counts_only() -> None:
     """Pairing a challenger's purchase model with the champion's spend model misattributes it."""
     frame = synthetic_scored()
@@ -249,6 +244,78 @@ def test_bucket_shortfall_sums_to_the_aggregate_miss() -> None:
     aggregate = frame["expected_purchases"].sum() - frame["holdout_frequency"].sum()
 
     assert table["shortfall"].sum() == pytest.approx(aggregate)
+
+
+def test_bucket_misses_expose_errors_that_cancel_in_the_net() -> None:
+    """The Phase 4 audit's finding, as a test: a small net miss can hide large offsetting ones.
+
+    Built by hand so the answer is known. One model misses by -10 in one bucket and +10 in another
+    and nets to zero. The other misses by -3 in each and nets to -6. Ranked on net, the first wins.
+    Ranked bucket by bucket, the second does. Both totals must be reported.
+    """
+    buckets = pd.DataFrame(
+        {
+            "bucket": ["0", "1"],
+            "customers": [10, 10],
+            "actual": [1.0, 1.0],
+            CHAMPION: [0.7, 0.7],
+            "pareto_nbd": [0.0, 2.0],
+        }
+    )
+    misses = bucket_misses(buckets).set_index("model")
+
+    assert misses.loc["pareto_nbd", "net"] == pytest.approx(0.0)
+    assert misses.loc["pareto_nbd", "absolute"] == pytest.approx(20.0)
+    assert misses.loc[CHAMPION, "net"] == pytest.approx(-6.0)
+    assert misses.loc[CHAMPION, "absolute"] == pytest.approx(6.0)
+
+
+def test_bucket_misses_reconcile_with_the_bucket_shortfall() -> None:
+    """The champion's net miss is the same number the bucket table's shortfall column sums to."""
+    table = bucket_table(synthetic_scored())
+    misses = bucket_misses(table).set_index("model")
+
+    assert misses.loc[CHAMPION, "net"] == pytest.approx(table["shortfall"].sum())
+
+
+# --------------------------------------------------------------------------------------------
+# Intervals and deciles
+# --------------------------------------------------------------------------------------------
+
+
+def test_no_intervals_are_summarised_for_a_map_fit() -> None:
+    """MAP rows carry NULL intervals, and the report must say there are none, not quote old ones."""
+    assert interval_summary(synthetic_scored()) is None
+
+
+def test_interval_coverage_counts_customers_whose_spend_falls_inside() -> None:
+    """Computed from the table, so a figure from a past run can never be printed again."""
+    frame = synthetic_scored(n=4)
+    frame["expected_forward_revenue"] = 100.0
+    frame["forward_revenue_hdi_low"] = 90.0
+    frame["forward_revenue_hdi_high"] = 110.0
+    frame["holdout_spend"] = [0.0, 95.0, 110.0, 200.0]
+
+    summary = interval_summary(frame)
+
+    assert summary is not None
+    assert summary.coverage == pytest.approx(0.5)
+    assert summary.median_relative_width == pytest.approx(0.2)
+
+
+def test_lowest_decile_describes_the_same_customers_the_decile_table_does() -> None:
+    """Two rankings of the same customers must agree, or the sentence describes another decile."""
+    frame = synthetic_scored(n=100)
+    table = decile_table(
+        frame["holdout_spend"], frame["expected_forward_revenue"], frame["customer_id"]
+    )
+
+    bottom = lowest_decile(frame)
+    last = table.iloc[-1]
+
+    assert bottom.customers == last["customers"]
+    in_bottom = frame.nsmallest(bottom.customers, "expected_forward_revenue")
+    assert bottom.repeat_buyers == int((in_bottom["frequency"] > 0).sum())
 
 
 # --------------------------------------------------------------------------------------------
@@ -401,6 +468,35 @@ def test_the_scored_relation_holds_the_whole_calibration_population() -> None:
         ).fetchone()
 
     assert scored == calibration
+
+
+@pytest.mark.integration
+def test_the_same_period_baseline_is_last_windows_count_unscaled() -> None:
+    """Checked against the real relation, because that is where the rule is implemented.
+
+    This used to assert the property on the synthetic fixture, which builds the column from
+    `frequency` itself, so it could not fail. The Phase 4 audit flagged it. Here, any scaling
+    added to the dbt model fails it.
+    """
+    settings = get_settings()
+    _skip_without_warehouse(settings)
+
+    with connect(settings, read_only=True) as connection:
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "select table_name from information_schema.tables"
+            ).fetchall()
+        }
+        if SCORED_RELATION not in tables:
+            pytest.skip(f"{SCORED_RELATION} not built. Run `uv run ltv validate` first.")
+
+        (rescaled,) = connection.execute(
+            f"select count(*) from {SCORED_RELATION} "
+            f"where baseline_carry_forward is distinct from cast(frequency as double)"
+        ).fetchone()
+
+    assert rescaled == 0
 
 
 @pytest.mark.integration

@@ -177,6 +177,37 @@ def spearman(x, y) -> Correlation:
     return Correlation(rho=float(result.statistic), p_value=float(result.pvalue), n=x_values.size)
 
 
+def assign_deciles(predicted, keys) -> np.ndarray:
+    """Each customer's decile by prediction, 1 being the highest, in the input's own order.
+
+    Separate from :func:`decile_table` so that anything describing who sits in a decile uses the
+    same assignment the table does. A second copy of this ordering would be free to disagree.
+
+    Args:
+        predicted: The prediction to rank by, per customer.
+        keys: Customer identifiers, used only to break ranking ties deterministically. Without a
+            stable tiebreaker the committed report changes between runs on identical data, and a
+            report that churns cannot be diffed to see whether anything moved.
+    """
+    predicted_values = np.asarray(predicted, dtype=float)
+    key_values = np.asarray(keys)
+    if key_values.shape != predicted_values.shape:
+        raise ValueError("keys must have the same shape as the predictions.")
+
+    order = (
+        pd.DataFrame({"key": key_values, "predicted": predicted_values})
+        .sort_values(["predicted", "key"], ascending=[False, True], kind="mergesort")
+        .index.to_numpy()
+    )
+
+    # Equal-count deciles by position in the sorted order, so ties cannot pile into one bucket and
+    # leave another empty -- which is a real risk here, where 14,120 customers share one population
+    # spend estimate.
+    deciles = np.empty(len(order), dtype=int)
+    deciles[order] = (np.arange(len(order)) * DECILES // len(order)) + 1
+    return deciles
+
+
 def decile_table(actual, predicted, keys) -> pd.DataFrame:
     """Rank customers by prediction, then report what each tenth actually did.
 
@@ -197,19 +228,13 @@ def decile_table(actual, predicted, keys) -> pd.DataFrame:
         share of the realised total it captured.
     """
     actual_values, predicted_values = _paired(actual, predicted)
-    key_values = np.asarray(keys)
-    if key_values.shape != actual_values.shape:
-        raise ValueError("keys must have the same shape as actual and predicted.")
-
     frame = pd.DataFrame(
-        {"key": key_values, "actual": actual_values, "predicted": predicted_values}
-    ).sort_values(["predicted", "key"], ascending=[False, True], kind="mergesort")
-
-    # Equal-count deciles by position in the sorted order, so ties cannot pile into one bucket and
-    # leave another empty -- which is a real risk here, where 14,120 customers share one population
-    # spend estimate.
-    position = np.arange(len(frame))
-    frame["decile"] = (position * DECILES // len(frame)) + 1
+        {
+            "actual": actual_values,
+            "predicted": predicted_values,
+            "decile": assign_deciles(predicted_values, keys),
+        }
+    )
 
     actual_total = frame["actual"].sum()
     table = (

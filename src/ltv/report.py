@@ -33,6 +33,7 @@ QUANTITY_TITLES = {
 
 FAMILY_LABELS = {
     CHAMPION: "BG/NBD + Gamma-Gamma",
+    "baseline_recent": "Naive: last quarter's rate",
     "baseline_carry_forward": "Naive: same as last window",
     "baseline_rate": "Naive: calibration rate",
     "baseline_flat": "Naive: population mean",
@@ -40,6 +41,23 @@ FAMILY_LABELS = {
     "mbg_nbd": "MBG/NBD",
     "pareto_nbd": "Pareto/NBD",
 }
+
+#: Where a family means something different for one quantity. The order-value baseline is "past
+#: average order value", which the rate label above would misdescribe. The audit caught that table
+#: calling it "calibration rate".
+QUANTITY_LABELS = {("avg_order_value", "baseline_rate"): "Naive: past average order value"}
+
+#: The naive rules that predict purchase counts, in the order the headline discusses them.
+NAIVE_PURCHASE_RULES = (
+    "baseline_recent",
+    "baseline_carry_forward",
+    "baseline_rate",
+    "baseline_flat",
+    "baseline_zero",
+)
+
+#: Models fitted to the calibration window, as opposed to naive rules.
+FITTED_MODELS = (CHAMPION, "mbg_nbd", "pareto_nbd")
 
 
 def _number(value: float, places: int = 2) -> str:
@@ -65,28 +83,29 @@ def _table(frame: pd.DataFrame, formatters: dict[str, int] | None = None) -> str
     return "\n".join([header, divider, *rows])
 
 
+def _label(family: str, quantity: str) -> str:
+    return QUANTITY_LABELS.get((quantity, family), FAMILY_LABELS.get(family, family))
+
+
 def _accuracy_table(scores: tuple[Score, ...], quantity: str) -> str:
-    relevant = [s for s in scores if s.quantity == quantity]
-    frame = pd.DataFrame(
-        [
-            {
-                "Model": FAMILY_LABELS.get(s.family, s.family),
-                "MAE": _number(s.mae, 3),
-                "RMSE": _number(s.rmse, 3),
-                (
-                    "Sum of per-customer means" if quantity == "avg_order_value" else "Actual total"
-                ): _number(s.aggregate.actual_total, 0),
-                (
-                    "Predicted, same basis" if quantity == "avg_order_value" else "Predicted total"
-                ): _number(s.aggregate.predicted_total, 0),
-                "Error %": _number(s.aggregate.percent_error, 1),
-                "Spearman ρ": _number(s.rank.rho, 3),
-                "MAPE %": _number(s.mape.value, 1) if s.mape else "not reported",
-            }
-            for s in relevant
-        ]
-    )
-    return _table(frame)
+    rows = []
+    for item in (s for s in scores if s.quantity == quantity):
+        row = {
+            "Model": _label(item.family, quantity),
+            "MAE": _number(item.mae, 3),
+            "RMSE": _number(item.rmse, 3),
+        }
+        # No total or aggregate error for order value. A sum of per-customer averages is not an
+        # amount anyone spends, so a percentage error on it measures nothing. The audit caught the
+        # earlier table reporting one.
+        if quantity != "avg_order_value":
+            row["Actual total"] = _number(item.aggregate.actual_total, 0)
+            row["Predicted total"] = _number(item.aggregate.predicted_total, 0)
+            row["Error %"] = _number(item.aggregate.percent_error, 1)
+        row["Spearman ρ"] = _number(item.rank.rho, 3)
+        row["MAPE %"] = _number(item.mape.value, 1) if item.mape else "not reported"
+        rows.append(row)
+    return _table(pd.DataFrame(rows))
 
 
 def _mape_note(scores: tuple[Score, ...], quantity: str) -> str:
@@ -128,19 +147,87 @@ def _required(result: ValidationResult, family: str, quantity: str) -> Score:
     return score
 
 
+def _sensitivity_sentence(result: ValidationResult, model_error: float) -> str:
+    """Say whether the recent rule's result depends on its window, from the sensitivity relation."""
+    table = result.recent_sensitivity
+    others = table[table["window_days"] != result.recent_window_days]
+    if others.empty:
+        return ""
+    listed = ", ".join(
+        f"{int(row.window_days)} days {row.percent_error:+.1f}%" for row in others.itertuples()
+    )
+    robust = bool((table["percent_error"].abs() < abs(model_error)).all())
+    return (
+        f" The window is one quarter, fixed before looking at results. Other windows give "
+        f"{listed}, so "
+        + (
+            "every window tested lands closer than the model and the conclusion does not depend "
+            "on the choice."
+            if robust
+            else "the result depends on the window chosen and should be read with that in mind."
+        )
+    )
+
+
 def _headline(result: ValidationResult) -> list[str]:
+    """State the result against the strongest naive rule, not the most convenient one.
+
+    The first version of this headline said the model's value was "in aggregate totals and in
+    ranking". The ranking section below already showed a naive rule ahead on rank correlation, and
+    the Phase 4 audit found a recent-rate rule closer on the total. So the verdicts here are
+    computed from the scores, not written in advance of them.
+    """
     purchases = _required(result, CHAMPION, "purchases")
-    baseline = _required(result, "baseline_rate", "purchases")
-    flat = _required(result, "baseline_flat", "purchases")
+    naive = {family: _required(result, family, "purchases") for family in NAIVE_PURCHASE_RULES}
+    recent, carry = naive["baseline_recent"], naive["baseline_carry_forward"]
+    rate, flat, zero = naive["baseline_rate"], naive["baseline_flat"], naive["baseline_zero"]
+    model_error = purchases.aggregate.percent_error
 
-    carry = _required(result, "baseline_carry_forward", "purchases")
-    zero = _required(result, "baseline_zero", "purchases")
+    closer = [
+        rule
+        for family, rule in naive.items()
+        if family != "baseline_zero" and abs(rule.aggregate.percent_error) < abs(model_error)
+    ]
+    if closer:
+        best = min(closer, key=lambda rule: abs(rule.aggregate.percent_error))
+        closest = (
+            ""
+            if best.family == "baseline_recent"
+            else f" The closest is {FAMILY_LABELS[best.family].removeprefix('Naive: ')}, at "
+            f"{best.aggregate.percent_error:+.1f}%."
+        )
+        aggregate = (
+            f"**On the aggregate total, the model does not beat the best naive rule.** "
+            f"{len(closer)} of the {len(naive) - 1} naive rules that forecast purchases "
+            f"{'lands' if len(closer) == 1 else 'land'} closer.{closest} Predicting that each "
+            f"customer keeps repeating at the rate of their last {result.recent_window_days} "
+            f"days of calibration gives "
+            f"{recent.aggregate.predicted_total:,.0f} ({recent.aggregate.percent_error:+.1f}%)."
+            + _sensitivity_sentence(result, model_error)
+        )
+    else:
+        aggregate = (
+            f"On the aggregate total the model is closer than every naive rule tested, including "
+            f"the rate of each customer's last {result.recent_window_days} days "
+            f"({recent.aggregate.percent_error:+.1f}%)."
+        )
 
-    beaten = [b for b in (carry, baseline, flat, zero) if purchases.mae < b.mae]
+    beaten = [rule for rule in naive.values() if purchases.mae < rule.mae]
     verdict = (
-        f"beats all {len(beaten)} naive rules"
-        if len(beaten) == 4
-        else f"beats {len(beaten)} of the 4 naive rules"
+        f"has a lower MAE than all {len(naive)} naive rules"
+        if len(beaten) == len(naive)
+        else f"has a lower MAE than {len(beaten)} of the {len(naive)} naive rules"
+    )
+
+    model_rho = _required(result, CHAMPION, "revenue").rank.rho
+    naive_rho = max(
+        (_required(result, family, "revenue").rank.rho for family in NAIVE_PURCHASE_RULES),
+        key=lambda rho: -1.0 if rho != rho else rho,
+    )
+    ranking = (
+        "and *Does the ranking work?* shows it is not better at ranking either"
+        if naive_rho >= model_rho
+        else "though it does rank customers better than any naive rule"
     )
 
     return [
@@ -148,33 +235,32 @@ def _headline(result: ValidationResult) -> list[str]:
         "",
         f"Over the {result.horizon_days}-day holdout window, the model predicts "
         f"**{purchases.aggregate.predicted_total:,.0f}** purchases against "
-        f"**{purchases.aggregate.actual_total:,.0f}** actual — "
-        f"**{purchases.aggregate.percent_error:+.1f}%**. The naive rule that each customer keeps "
-        f"repeating at their calibration rate predicts "
-        f"{baseline.aggregate.predicted_total:,.0f} "
-        f"({baseline.aggregate.percent_error:+.1f}%), and "
-        f"assuming every customer is average predicts "
-        f"{flat.aggregate.predicted_total:,.0f} ({flat.aggregate.percent_error:+.1f}%).",
+        f"**{purchases.aggregate.actual_total:,.0f}** actual: **{model_error:+.1f}%**.",
         "",
-        f"The fairest comparison is the same-period rule -- predict that a customer repeats as "
-        f"often as they did last window, which needs no rescaling because the two windows are the "
-        f"same length. It predicts {carry.aggregate.predicted_total:,.0f} "
-        f"({carry.aggregate.percent_error:+.1f}%). **The rate baselines above are inflated**: "
-        f"they divide by each customer's observation length and multiply by the holdout "
-        f"length, and mean customer age here is shorter than the holdout, so they scale every "
-        f"calibration count up before comparing. Roughly half of their "
-        f"{baseline.aggregate.percent_error:+.0f}% is rescaling rather than naivety.",
+        aggregate,
         "",
-        f"On per-customer error the model {verdict}: MAE {purchases.mae:.3f} against "
-        f"{zero.mae:.3f}, {carry.mae:.3f}, {baseline.mae:.3f} and {flat.mae:.3f}.",
+        f"The recent-rate rule works for the same reason the model misses. The purchase rate "
+        f"falls through calibration (see *Why the model falls short*), and a rule that looks only "
+        f"at the end of the window picks up the lower rate. Rules that average the whole window "
+        f"overshoot: each customer's calibration rate gives {rate.aggregate.percent_error:+.1f}% "
+        f"and the population rate {flat.aggregate.percent_error:+.1f}%. Both correctly adjust "
+        f"for how long each customer was observed. Predicting that each customer repeats as "
+        f"often as last window gives {carry.aggregate.percent_error:+.1f}%. That is closer, but "
+        f"only because it under-counts exposure: customers averaged "
+        f"{result.mean_customer_age:.0f} days of calibration against a {result.horizon_days}-day "
+        f"holdout, and that bias partly cancels the fall in the rate.",
         "",
-        f"**Read that MAE against the row below it, not against the others.** Predicting that "
-        f"nobody buys anything scores {zero.mae:.3f}, because {result.non_returners:,} of these "
-        f"customers genuinely buy nothing. On a mostly-zero quantity the all-zero rule is "
-        f"what MAE is really measured against, and the model clears it by "
-        f"{100 * (zero.mae - purchases.mae) / zero.mae:.1f}%. This model's value is in aggregate "
-        f"totals and in ranking, not in per-customer accuracy -- the sections below are where it "
-        f"earns its place.",
+        f"On per-customer error the model {verdict}: MAE {purchases.mae:.3f}, against "
+        f"{recent.mae:.3f} for the last-quarter rule and {carry.mae:.3f}, {rate.mae:.3f} and "
+        f"{flat.mae:.3f} for the others. **Read it against predicting that nobody buys anything, "
+        f"which scores {zero.mae:.3f}**, because {result.non_returners:,} of these customers "
+        f"genuinely buy nothing. On a mostly-zero quantity that is the real floor, and the model "
+        f"clears it by {100 * (zero.mae - purchases.mae) / zero.mae:.1f}%.",
+        "",
+        f"So the model's measurable advantage is narrow. Per customer it is modestly better than "
+        f"the naive rules. It gives every customer an estimate, including those with no repeat "
+        f"history. It also gives a structural account of why it misses. It is "
+        f"{'not ' if closer else ''}more accurate on the total, {ranking}.",
         "",
     ]
 
@@ -269,66 +355,86 @@ def _buckets_section(result: ValidationResult) -> list[str]:
     return lines
 
 
-def _concentrated_shortfall(result: ValidationResult) -> list[str]:
-    """Compare each model where the champion's error actually lives.
+def bucket_misses(buckets: pd.DataFrame) -> pd.DataFrame:
+    """Purchases each fitted model missed in each calibration-frequency bucket.
 
-    The aggregate figures in the metrics table are dominated by the 14,119 customers who never
-    repeated, and every model gets those roughly right. The interesting comparison is the one- and
-    two-repeat buckets, which hold most of the shortfall and which the three models disagree about.
-    Computed from the bucket table rather than asserted, so this paragraph cannot drift away from
-    the numbers above it.
+    Predicted minus actual, so negative means under-predicted. One row per model, a column per
+    bucket, plus the net total and the sum of absolute misses. The two totals are both needed: a
+    model can have a small net miss because it is close everywhere, or because large under- and
+    over-predictions in different buckets offset. Only the absolute sum tells those apart.
     """
-    table = result.buckets
-    concentrated = table[table["bucket"].isin(["1", "2"])]
-    if concentrated.empty:
-        return []
+    models = [family for family in FITTED_MODELS if family in buckets.columns]
+    rows = []
+    for family in models:
+        misses = (buckets[family] - buckets["actual"]) * buckets["customers"]
+        row = {"model": family}
+        row.update(dict(zip(buckets["bucket"], misses, strict=True)))
+        row["net"] = float(misses.sum())
+        row["absolute"] = float(misses.abs().sum())
+        rows.append(row)
+    return pd.DataFrame(rows)
 
-    # Baselines are printed for scale but excluded from `best`. A naive rule cannot support a
-    # conclusion about dropout timing, and on a second source one of them could well win the
-    # bucket -- at which point the paragraph below would follow a result it does not describe.
-    models = [c for c in table.columns if c in (CHAMPION, "mbg_nbd", "pareto_nbd")]
-    families = [c for c in table.columns if c in FAMILY_LABELS and c != "baseline_flat"]
-    misses = {
-        family: float(
-            ((concentrated[family] - concentrated["actual"]) * concentrated["customers"]).sum()
-        )
-        for family in families
-        if family in concentrated.columns
-    }
+
+def _bucket_comparison(result: ValidationResult) -> list[str]:
+    """Compare the fitted models in every bucket, not only the ones where a challenger wins.
+
+    The first version compared the one- and two-repeat buckets only, on the claim that "every model
+    gets [the zero-repeat customers] roughly right". The Phase 4 audit found that false. Pareto/NBD
+    misses the zero-repeat bucket nearly five times worse than BG/NBD, and its better total comes
+    from over-predicting heavy buyers, which offsets it. Every bucket is shown now, and the
+    conclusion is computed from them.
+    """
+    misses = bucket_misses(result.buckets)
     if len(misses) < 2:
         return []
 
-    contenders = {f: m for f, m in misses.items() if f in models}
-    if not contenders:
-        return []
-    best = min(contenders, key=lambda family: abs(contenders[family]))
-    ranked = ", ".join(
-        f"{FAMILY_LABELS.get(family, family)} {misses[family]:+,.0f}"
-        for family in sorted(misses, key=lambda f: abs(misses[f]))
-    )
+    buckets = [c for c in misses.columns if c not in ("model", "net", "absolute")]
+    display = misses.rename(columns={"net": "Net", "absolute": "Sum of absolute misses"})
+    display["model"] = display["model"].map(lambda family: FAMILY_LABELS.get(family, family))
+    display = display.rename(columns={"model": "Model"})
 
-    # The conclusion has to follow from which model actually won, not be asserted beside it. If the
-    # champion is closest, there is no evidence here that a different dropout mechanism helps, and
-    # saying otherwise would be a paragraph that survived its own result.
-    conclusion = (
-        "That is a result about dropout timing rather than about estimation. BG/NBD only lets a "
-        "customer churn immediately after a purchase; Pareto/NBD lets them churn at any moment, "
-        "governed by an exponential lifetime. A customer who repeated once and then went quiet is "
-        "exactly the case those two assumptions disagree about most."
-        if best != CHAMPION
-        else "The champion is closest in this bucket, so it gives no evidence that a different "
-        "dropout mechanism would do better here."
-    )
+    by_net = misses.loc[misses["net"].abs().idxmin()]
+    by_absolute = misses.loc[misses["absolute"].idxmin()]
+    champion = misses[misses["model"] == CHAMPION].iloc[0]
+    under = sum(champion[bucket] < 0 for bucket in buckets)
 
-    return [
-        f"**In the one- and two-repeat buckets, where most of the shortfall sits, the models "
-        f"genuinely differ.** Purchases missed across those two buckets: {ranked}. "
-        f"{FAMILY_LABELS.get(best, best)} comes closest of the fitted models; the naive rules are "
-        f"listed for scale and are not candidates for this conclusion.",
+    lines = [
+        "Purchases each fitted model missed, per calibration-repeat bucket. Negative means "
+        "under-predicted.",
         "",
-        conclusion,
+        _table(display, {column: 0 for column in [*buckets, "Net", "Sum of absolute misses"]}),
         "",
     ]
+    if by_net["model"] != by_absolute["model"]:
+        lines.append(
+            f"**The net total and the bucket-level misses rank the models differently.** "
+            f"{FAMILY_LABELS[by_net['model']]} has the smallest net miss "
+            f"({by_net['net']:+,.0f}), but its misses add up to {by_net['absolute']:,.0f} "
+            f"bucket by bucket, against {by_absolute['absolute']:,.0f} for "
+            f"{FAMILY_LABELS[by_absolute['model']]}. Its total is closer because its under- and "
+            f"over-predictions offset, not because it is closer in each bucket. So these fits do "
+            f"not show that a different dropout mechanism fixes the shortfall."
+        )
+    else:
+        lines.append(
+            f"{FAMILY_LABELS[by_net['model']]} is closest both net and bucket by bucket "
+            f"({by_net['net']:+,.0f} net, {by_net['absolute']:,.0f} absolute)."
+        )
+    extent = "every" if under == len(buckets) else "nearly every"
+    lines.extend(
+        [
+            "",
+            f"BG/NBD under-predicts in {under} of {len(buckets)} buckets."
+            + (
+                f" A shortfall in {extent} bucket is consistent with the purchase rate itself "
+                f"changing between the windows, which none of the three models represents."
+                if under >= len(buckets) - 1
+                else ""
+            ),
+            "",
+        ]
+    )
+    return lines
 
 
 def _challengers_section(result: ValidationResult) -> list[str]:
@@ -355,7 +461,7 @@ def _challengers_section(result: ValidationResult) -> list[str]:
         "would attribute the spend model's behaviour to a purchase model that had nothing to do "
         "with it.",
         "",
-        *_concentrated_shortfall(result),
+        *_bucket_comparison(result),
     ]
 
     rows = []
@@ -458,6 +564,15 @@ def _benchmark_section(result: ValidationResult) -> list[str]:
     comparison = result.benchmark
     published = comparison.published
 
+    # The paper's figure is cumulative over both windows, so this computes the same basis: expected
+    # repeat transactions across calibration and holdout together, against actual. The earlier text
+    # said the report "gives both bases" and then never computed this one. Holdout purchases count
+    # as repeats here because every customer's first purchase falls inside calibration.
+    holdout = _required(result, CHAMPION, "purchases").aggregate
+    cumulative_actual = result.calibration_fit.actual_total + holdout.actual_total
+    cumulative_expected = result.calibration_fit.predicted_total + holdout.predicted_total
+    cumulative_error = 100.0 * (cumulative_expected - cumulative_actual) / cumulative_actual
+
     rows = [
         {
             "Parameter": name,
@@ -494,9 +609,11 @@ def _benchmark_section(result: ValidationResult) -> list[str]:
         f"over the forecast period. **That figure is cumulative across all 78 weeks and must "
         f"not be "
         f"read against the holdout-only error above**: an in-sample fit accurate to within a "
-        f"percent over the first 39 weeks dilutes whatever happens in the second 39. The "
-        f'"Fitting is not predicting" table gives both bases so the two can be compared like with '
-        f"like.",
+        f"percent over the first 39 weeks dilutes whatever happens in the second 39. On the "
+        f"paper's cumulative basis, this project's BG/NBD expects "
+        f"{cumulative_expected:,.0f} repeat transactions against {cumulative_actual:,.0f} "
+        f"actual: **{cumulative_error:+.1f}%**, the figure to set beside the paper's. The two "
+        f"still differ in sample, so they are not expected to match exactly.",
         "",
         f"One structural detail reproduces independently and is worth noting: the paper's "
         f"zero-class "
@@ -567,45 +684,81 @@ def _deciles_section(result: ValidationResult) -> list[str]:
         f"points of it, and on rank correlation it is actually **ahead**: Spearman ρ "
         f"{baseline_rank.rank.rho:.3f} against the model's {model_rank.rank.rho:.3f} on revenue, "
         f"and {_required(result, 'baseline_rate', 'purchases').rank.rho:.3f} against "
-        f"{_required(result, CHAMPION, 'purchases').rank.rho:.3f} on purchase counts. Ranking "
-        f"customers by what they already spent is a strong rule on this dataset, and the modelling "
-        f"does not improve on it.",
+        f"{_required(result, CHAMPION, 'purchases').rank.rho:.3f} on purchase counts. The naive "
+        f"ranking is each customer's calibration purchase rate times their past average order "
+        f"value, and the modelling does not improve on it.",
         "",
-        f"The ordering is also not merely flat below decile 4 -- it is mildly **inverted**. "
-        f"Decile 10, the lowest-predicted tenth, realises a mean of "
-        f"{table['mean_actual'].iloc[-1]:,.2f} against "
-        f"{table['mean_actual'].iloc[4:9].min():,.2f}-{table['mean_actual'].iloc[4:9].max():,.2f} "
-        f"across deciles 5-9. Below the top few deciles the model is not ranking these customers "
-        f"at all, which is consistent with what it has to work with: most of them made no repeat "
-        f"purchase, so their predictions differ only through customer age.",
-        "",
-        "What the model does add over that rule is calibration rather than order: it puts the "
-        "predictions on a scale that is 14% low rather than 47% high, and it assigns a value to "
-        "every customer including those with no repeat history. For choosing *who* to target, the "
-        "naive rule is competitive. For forecasting *how much*, it is not.",
+        *_lowest_decile_lines(result, table),
+    ]
+
+
+def _lowest_decile_lines(result: ValidationResult, table: pd.DataFrame) -> list[str]:
+    """Describe decile 10 from its measured composition.
+
+    The first version explained decile 10 as mostly one-time buyers whose predictions differ only
+    through customer age. The Phase 4 audit found that 45% of it are repeat buyers the model rates
+    as probably lapsed, and that they out-spend the one-time buyers around them. The explanation
+    now comes from that composition, and is only offered when the ordering actually inverts.
+    """
+    bottom = result.lowest_decile
+    middle = table["mean_actual"].iloc[4:9]
+    lowest = table["mean_actual"].iloc[-1]
+    if bottom is None or lowest <= middle.min():
+        return []
+    return [
+        f"The ordering is also mildly **inverted** at the bottom. Decile 10, the "
+        f"lowest-predicted tenth, realises a mean of {lowest:,.2f} against "
+        f"{middle.min():,.2f}-{middle.max():,.2f} across deciles 5-9. Of its "
+        f"{bottom.customers:,} customers, {bottom.repeat_buyers:,} "
+        f"({bottom.repeat_buyers / bottom.customers:.0%}) are repeat buyers, with a mean "
+        f"probability alive of {bottom.repeat_mean_probability_alive:.2f}. They spent "
+        f"{bottom.repeat_mean_actual:,.2f} on average in the holdout, against "
+        f"{bottom.one_time_mean_actual:,.2f} for the one-time buyers in the same decile."
+        + (
+            " The model ranks these repeat buyers at the very bottom, yet they spend more in the "
+            "holdout than the one-time buyers ranked alongside them. That is the same write-off "
+            "the frequency buckets show."
+            if bottom.repeat_mean_actual > bottom.one_time_mean_actual
+            else ""
+        ),
         "",
     ]
+
+
+def _intervals_line(result: ValidationResult) -> str:
+    """Describe the intervals from the table, or their absence.
+
+    The full-Bayes branch used to quote "6-10%" and "0.6%" as fixed text from one past run. Any
+    later run would have printed them unverified, and without the one-off label the sign-off
+    conditions require. Every figure here is computed from the predictions being reported.
+    """
+    intervals = result.intervals
+    if intervals is None:
+        return (
+            f"- **No uncertainty intervals.** This is a `{result.fit_method}` fit, and the "
+            f"predictions table carries none. MAP returns a single point, so any interval "
+            f"computed from it would be zero-width and read as certainty. Intervals require "
+            f"`uv run ltv fit --full-bayes`."
+        )
+    return (
+        f"- **The intervals are on the model's expectation, not on what a customer will do.** "
+        f"This `{result.fit_method}` fit carries a 94% HDI on forward revenue for "
+        f"{intervals.customers:,} customers. It expresses how precisely the population "
+        f"parameters are pinned down, which here is very precisely: the median interval is "
+        f"{intervals.median_relative_width:.1%} of its estimate (5th-95th percentile "
+        f"{intervals.p5_relative_width:.1%}-{intervals.p95_relative_width:.1%}). Only "
+        f"{intervals.coverage:.1%} of customers' realised holdout spend falls inside their own "
+        f"interval. That is not a defect: an individual outcome is dominated by Poisson and "
+        f"gamma variation the interval deliberately leaves out. It does mean these intervals "
+        f"must never be presented as a range a customer's revenue is likely to land in."
+    )
 
 
 def _limits_section(result: ValidationResult) -> list[str]:
     lines = [
         "## What this report does not establish",
         "",
-        f"- **No uncertainty intervals.** This is a `{result.fit_method}` fit. "
-        + (
-            "MAP returns a single point, so any interval computed from it would be zero-width and "
-            "read as certainty. Intervals require `uv run ltv fit --full-bayes`."
-            if result.fit_method == "map"
-            else "The predictions table carries a 94% HDI on forward revenue, sampled with NUTS. "
-            "**It is an interval on the model's expectation, not on what a customer will do.** It "
-            "expresses how precisely the four population parameters are pinned down by 23,570 "
-            "observations — which is very precisely, so the intervals are narrow, around 6-10% "
-            "of the estimate. Only 0.6% of customers' realised holdout spend falls inside their "
-            "own interval. That is not a defect: an individual outcome is dominated by "
-            "Poisson and gamma variation the interval deliberately does not include. It does mean "
-            "these intervals must never be presented as a range a customer's revenue is likely to "
-            "land in."
-        ),
+        _intervals_line(result),
         "- **LTV here means expected forward revenue over a stated horizon, undiscounted** — not "
         "gross margin. Margin and discount rate are business inputs this dataset does not contain.",
         "- **One dataset, one cohort.** Every customer here made their first purchase at CDNOW in "
@@ -661,6 +814,11 @@ def write_report(
                     "quantity "
                     "that does not exist for them.",
                     "",
+                    f"{result.order_value_shared_estimate:,} of those customers had no repeat "
+                    f"purchase in calibration. The spend model and the naive rule both give them "
+                    f"the same population mean, so on those rows the two cannot differ, and the "
+                    f"comparison above is diluted towards a tie.",
+                    "",
                 ]
             )
 
@@ -675,15 +833,17 @@ def write_report(
                 "### Why the model falls short",
                 "",
                 "BG/NBD can only explain a falling purchase rate as customers dropping out, so it "
-                "extrapolates the calibration decline forward. The realised series declines "
-                "through calibration and then levels off. The model keeps decaying; the cohort "
-                "does not.",
+                "extrapolates the calibration decline forward. The realised series falls steeply "
+                "through calibration, then keeps falling through the holdout but more slowly, "
+                "with a rebound in the fourth quarter. The model keeps decaying at the "
+                "calibration pace; the cohort does not.",
                 "",
                 "Read the first three months as cohort formation rather than growth: every "
                 "customer in this dataset makes their first purchase in Q1 1997, so the repeat "
                 "series necessarily climbs while the cohort is still being acquired. The part that "
-                "matters is what happens after it: a steep fall to the cutoff, and then a flat "
-                "stretch the model has no way to represent.",
+                "matters is what happens after it: a steep fall to the cutoff, then a slower "
+                "decline and a fourth-quarter rebound that looks seasonal. Neither the change of "
+                "pace nor seasonality is something the three models here can represent.",
                 "",
                 f"![Repeat occasions per month]({charts[1].name})",
                 "",
