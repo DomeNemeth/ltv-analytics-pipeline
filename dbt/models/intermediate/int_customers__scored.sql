@@ -29,7 +29,7 @@
 --
 -- 3. **The baselines are functions of calibration columns only.** A baseline that reached for a
 --    holdout column would beat the model by cheating, and the model would look worse than nothing.
---    assert_baselines_use_only_calibration_inputs recomputes all three independently.
+--    assert_baselines_use_only_calibration_inputs recomputes every one of them independently.
 --
 -- Note the scoring asymmetry, which is correct: holdout_frequency counts *every* occasion while
 -- calibration frequency counts repeats only. BG/NBD's expected_purchases predicts all purchases in
@@ -57,6 +57,29 @@ windows as (
 predictions as (
 
     select * from {{ ref('stg_model__customer_predictions') }}
+
+),
+
+recent_repeats as (
+
+    {{ recent_repeats(var('recent_window_days')) }}
+
+),
+
+recent as (
+
+    -- The recent repeat rate per day, computed once so the purchase and revenue baselines below
+    -- cannot disagree about it.
+    select
+        source,
+        customer_id,
+        window_days,
+        case
+            when recent_exposure_days > 0
+                then cast(recent_repeats as double) / recent_exposure_days
+            else 0.0
+        end as repeats_per_day
+    from recent_repeats
 
 ),
 
@@ -104,6 +127,10 @@ select
     predictions.probability_alive,
     predictions.expected_avg_value,
     predictions.expected_forward_revenue,
+    -- NULL on every MAP row by construction. Carried so the report can compute what the
+    -- intervals cover from the table itself, rather than quoting a figure from one past run.
+    predictions.forward_revenue_hdi_low,
+    predictions.forward_revenue_hdi_high,
     predictions.spend_estimate_source,
     predictions.fit_method,
 
@@ -145,20 +172,20 @@ select
     * windows.duration_holdout
     * population.mean_repeat_order_value as baseline_revenue_flat,
 
-    -- Naive baseline 3: whatever you did last window, you will do again. Added after a validation
-    -- audit pointed out that the two baselines above share a hidden inflation, and that it was
-    -- flattering the model by roughly half of the reported margin.
+    -- Naive baseline 3: whatever you did last window, you will do again.
     --
-    -- `baseline_purchases` divides by each customer's own observation length and multiplies by the
-    -- holdout length. That is a correct Poisson-rate estimate, but mean customer_age on CDNOW is
-    -- 229 days against a 273-day holdout, so it scales every calibration count up by 273/229 =
-    -- 1.19 before comparing. The resulting "+47%" is therefore partly the rescaling rather than
-    -- the naivety, and both rate baselines inherit it because it is one factor applied two ways.
+    -- An earlier version of this comment called the two rate baselines above "inflated". The
+    -- Phase 4 audit showed that reading was backwards. `baseline_purchases` divides by each
+    -- customer's own exposure and multiplies by the holdout length, which is a correct
+    -- exposure adjustment. This rule is the biased one: on CDNOW a customer was observed for 229
+    -- days of calibration on average, not 273, so it under-counts exposure by about a sixth. It
+    -- lands closer to the actual total only because that under-count partly cancels the rate
+    -- rules' real problem: the purchase rate fell through calibration, so any average over the
+    -- whole window overshoots the holdout. Two errors cancelling are not a fairer comparison. They
+    -- are a luckier one.
     --
-    -- Here the two windows are the same length -- 39 weeks each, to the day -- so the honest
-    -- same-period rule needs no rescaling at all and is the harder thing to beat. Reported
-    -- alongside the others rather than replacing them: the rate baseline is the right rule when
-    -- windows differ, which they will the moment a second source lands.
+    -- Kept because it is the rule a business would most likely use, and because the report has to
+    -- show where each naive rule's number comes from.
     cast(calibration.frequency as double) as baseline_carry_forward,
 
     cast(calibration.frequency as double)
@@ -166,6 +193,30 @@ select
         when calibration.is_gamma_gamma_eligible then cast(calibration.monetary_value as double)
         else population.mean_repeat_order_value
     end as baseline_revenue_carry_forward,
+
+    -- Naive baseline 4: this customer keeps repeating at the rate of their last quarter. Added after
+    -- the Phase 4 audit found it closer on the total than the model. Every rule above averages
+    -- over the whole calibration window, but the purchase rate falls steeply through that window,
+    -- so they all overshoot. A rule that looks only at the end of the window does not.
+    -- This is the non-stationarity the report diagnoses, and it is not a model's to exploit, but
+    -- it is available to anyone with the data, so it is the comparison the model has to face.
+    --
+    -- The window is fixed at 91 days (one quarter) on conventional grounds, not on results. The
+    -- auditor measured 30, 61 and 91 days, and 91 is the least flattering to the rule of the
+    -- three. int_baselines__recent_window_sensitivity reports all three so a reader can see the
+    -- choice does not carry the conclusion.
+    recent.window_days as recent_window_days,
+
+    -- No coalesce. The macro keeps every calibration customer, so a NULL here means a row went
+    -- missing in the join, and the not_null test must see it rather than a quiet zero.
+    recent.repeats_per_day * windows.duration_holdout as baseline_recent,
+
+    recent.repeats_per_day
+    * windows.duration_holdout
+    * case
+        when calibration.is_gamma_gamma_eligible then cast(calibration.monetary_value as double)
+        else population.mean_repeat_order_value
+    end as baseline_revenue_recent,
 
     -- The floor beneath every floor: predict that nobody buys anything. Not a serious rule, and
     -- that is the point. On a quantity where 70% of the actuals are zero, this is what per-customer
@@ -185,6 +236,10 @@ inner join population
 left join actuals
     on calibration.source = actuals.source
     and calibration.customer_id = actuals.customer_id
+
+left join recent
+    on calibration.source = recent.source
+    and calibration.customer_id = recent.customer_id
 
 left join predictions
     on calibration.source = predictions.source

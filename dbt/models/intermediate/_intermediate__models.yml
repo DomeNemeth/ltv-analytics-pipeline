@@ -154,7 +154,7 @@ models:
   - name: int_customers__scored
     description: >
       One row per calibration customer: the model's prediction, the customer's actual holdout
-      behaviour, two naive baselines, and the calibration features all three are conditioned on.
+      behaviour, the naive baselines, and the calibration features they are all conditioned on.
       What `ltv validate` computes its metrics from, and what the Phase 5 marts read.
     columns:
       - name: customer_id
@@ -219,8 +219,57 @@ models:
       - name: baseline_carry_forward
         description: >
           Naive rule with no rescaling: you repeat as often next window as you did last window.
-          Valid here only because the two windows are the same length, which is also what makes it
-          the fairest comparison available -- the rate baselines inflate by holdout/customer_age.
+          Biased low on exposure: customers averaged 229 days of calibration on CDNOW against a
+          273-day holdout. It lands nearer the actual total than the rate rules only because that
+          bias partly cancels the fall in the purchase rate.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: expected_avg_value
+        description: >
+          The spend model's expected order value. The population mean for customers Gamma-Gamma
+          could not fit, flagged by spend_estimate_source, never NULL.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: expected_forward_revenue
+        description: >
+          Expected purchases times expected order value over duration_holdout days.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_revenue
+        description: >
+          baseline_purchases times baseline_avg_value. Reported, so guarded: a NULL here would
+          drop the customer from the revenue metrics without anything failing.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_revenue_carry_forward
+        description: >
+          baseline_carry_forward times baseline_avg_value.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: recent_window_days
+        description: >
+          Look-back length behind baseline_recent, from var recent_window_days. Carried on the row
+          so the report reads the window it describes rather than restating it.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_recent
+        description: >
+          Naive rule: the customer keeps repeating at the rate of their last recent_window_days of
+          calibration, scaled to the holdout length. Exploits the fall in the purchase rate that
+          the whole-window rules average over. Calibration occasions only, via
+          macros/recent_repeats.sql.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_revenue_recent
+        description: >
+          baseline_recent times baseline_avg_value.
         data_tests:
           - not_null:
               config: {tags: [post_fit]}
@@ -231,6 +280,22 @@ models:
         data_tests:
           - not_null:
               config: {tags: [post_fit]}
+
+  - name: int_baselines__recent_window_sensitivity
+    description: >
+      The recent-run-rate baseline's predicted holdout total at look-back windows of 30, 61 and 91
+      days, plus the configured window if it is none of those. Shows whether the window choice
+      carries the conclusion. One row per (source, window_days), asserted by
+      assert_recent_window_sensitivity_grain.
+    columns:
+      - name: source
+        data_tests: [not_null]
+      - name: window_days
+        data_tests: [not_null]
+      - name: predicted_purchases
+        data_tests: [not_null]
+      - name: actual_purchases
+        data_tests: [not_null]
 
   - name: int_cohorts__monthly_retention
     description: >

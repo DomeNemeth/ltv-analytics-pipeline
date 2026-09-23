@@ -21,6 +21,11 @@ vars:
   calibration_weeks: 39
   holdout_weeks: 39
 
+  # Look-back for the recent-run-rate baseline: one quarter, ending on the calibration cutoff.
+  # Fixed on conventional grounds before looking at which window flatters the rule most. See
+  # macros/recent_repeats.sql and int_baselines__recent_window_sensitivity.
+  recent_window_days: 91
+
 models:
   ltv:
     staging:

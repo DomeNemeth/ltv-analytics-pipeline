@@ -41,6 +41,34 @@ population as (
 
 ),
 
+recent as (
+
+    -- Written out here rather than calling macros/recent_repeats.sql. A test that called the
+    -- macro would share its definition, and any defect in the macro would pass. Repeat
+    -- occasions in the last var('recent_window_days') days of calibration, over the smaller of
+    -- that window and the customer's age.
+    select
+        calibration.source,
+        calibration.customer_id,
+        least({{ var('recent_window_days') }}, calibration.customer_age) as exposure_days,
+        (
+            select count(*)
+            from {{ ref('int_customers__purchase_occasions') }} as occasions
+            where occasions.source = calibration.source
+                and occasions.customer_id = calibration.customer_id
+                and occasions.order_date > calibration.first_order_date
+                and occasions.order_date <= windows.calibration_end
+                and date_diff('day', occasions.order_date, windows.calibration_end)
+                    < {{ var('recent_window_days') }}
+        ) as repeats
+
+    from calibration
+
+    inner join windows
+        on calibration.source = windows.source
+
+),
+
 recomputed as (
 
     select
@@ -69,7 +97,14 @@ recomputed as (
 
         cast(calibration.frequency as double) as baseline_carry_forward,
 
-        cast(0.0 as double) as baseline_zero
+        cast(0.0 as double) as baseline_zero,
+
+        case
+            when recent.exposure_days > 0
+                then cast(recent.repeats as double) / recent.exposure_days
+                    * windows.duration_holdout
+            else 0.0
+        end as baseline_recent
 
     from calibration
 
@@ -78,6 +113,10 @@ recomputed as (
 
     inner join population
         on calibration.source = population.source
+
+    inner join recent
+        on calibration.source = recent.source
+        and calibration.customer_id = recent.customer_id
 
 )
 
@@ -100,18 +139,29 @@ inner join recomputed
 -- as the Phase 2 finding where holdout money was emitted and never guarded. A number that appears
 -- in a report and in no test is a number nobody has checked.
 --
+-- Each comparison is wrapped in coalesce(..., true), so a NULL on the scored side counts as a
+-- failure. A bare `abs(a - b) > 1e-9` evaluates to NULL when either side is NULL, and a `where`
+-- clause treats NULL as false. That let the Phase 4 audit null 14,120 baseline values on a copy
+-- of the warehouse without this test noticing.
+--
 -- Tolerance is for floating-point association only. Any real change to a baseline moves it by
 -- orders of magnitude more than this.
-where abs(scored.baseline_purchases - recomputed.baseline_purchases) > 1e-9
-    or abs(scored.baseline_purchases_flat - recomputed.baseline_purchases_flat) > 1e-9
-    or abs(scored.baseline_avg_value - recomputed.baseline_avg_value) > 1e-9
-    or abs(scored.baseline_revenue_flat - recomputed.baseline_revenue_flat) > 1e-9
-    or abs(scored.baseline_carry_forward - recomputed.baseline_carry_forward) > 1e-9
-    or abs(scored.baseline_zero - recomputed.baseline_zero) > 1e-9
-    or abs(
-        scored.baseline_revenue - recomputed.baseline_purchases * recomputed.baseline_avg_value
-    ) > 1e-9
-    or abs(
-        scored.baseline_revenue_carry_forward
-        - recomputed.baseline_carry_forward * recomputed.baseline_avg_value
-    ) > 1e-9
+{% set comparisons = [
+    ('scored.baseline_purchases', 'recomputed.baseline_purchases'),
+    ('scored.baseline_purchases_flat', 'recomputed.baseline_purchases_flat'),
+    ('scored.baseline_avg_value', 'recomputed.baseline_avg_value'),
+    ('scored.baseline_revenue_flat', 'recomputed.baseline_revenue_flat'),
+    ('scored.baseline_carry_forward', 'recomputed.baseline_carry_forward'),
+    ('scored.baseline_zero', 'recomputed.baseline_zero'),
+    ('scored.baseline_recent', 'recomputed.baseline_recent'),
+    ('scored.baseline_revenue',
+        'recomputed.baseline_purchases * recomputed.baseline_avg_value'),
+    ('scored.baseline_revenue_carry_forward',
+        'recomputed.baseline_carry_forward * recomputed.baseline_avg_value'),
+    ('scored.baseline_revenue_recent',
+        'recomputed.baseline_recent * recomputed.baseline_avg_value'),
+] %}
+where
+{%- for scored_column, expected in comparisons %}
+    {% if not loop.first %}or {% endif %}coalesce(abs({{ scored_column }} - ({{ expected }})) > 1e-9, true)
+{%- endfor %}
