@@ -85,8 +85,13 @@ jobs:
       # something other than the current code, or the pipeline is not reproducible -- both are
       # failures, and both are invisible without this check. It is also what keeps the determinism
       # rule in ltv/report.py honest rather than aspirational.
+      #
+      # Not a plain `git diff`. The report is compared as bytes, but the charts are compared as
+      # decoded pixels, because Pillow's Windows and Linux wheels bundle different zlib builds.
+      # Identical charts committed from Windows therefore never match Linux's bytes. See the
+      # script's docstring.
       - name: Reports are reproducible
-        run: git diff --exit-code -- reports/
+        run: uv run python scripts/check_reports.py
 
       # A diff on a binary file says only that the bytes differ. Upload what CI generated so a
       # failure can be diagnosed by comparing it against the committed copy, not by guessing.

@@ -15,8 +15,13 @@ Matplotlib is imported inside the functions rather than at module scope. It cost
 and pulls a font cache build on a cold machine, and `ltv info` should not pay for that.
 
 Everything here is deterministic: no timestamps, no random jitter, fixed figure sizes and a fixed
-DPI. The PNGs are committed, so a re-run on unchanged data must produce the same bytes -- otherwise
+DPI. The PNGs are committed, so a re-run on unchanged data must produce the same chart -- otherwise
 every validation run shows up as a diff and nobody can tell which ones meant something.
+
+"The same chart" means the same pixels, not the same bytes. On one machine the bytes are stable
+too. Across platforms they are not: Pillow's Windows wheel compresses with zlib-ng and its Linux
+wheel with stock zlib, so identical pixels encode differently. `scripts/check_reports.py` compares
+decoded pixels for exactly this reason.
 """
 
 from __future__ import annotations
@@ -33,7 +38,7 @@ from ltv.warehouse import connect
 if TYPE_CHECKING:  # pragma: no cover
     from ltv.validate import ValidationResult
 
-#: Fixed so the committed PNGs are byte-stable across runs and machines.
+#: Fixed so the committed PNGs are pixel-stable across runs and machines.
 FIGURE_DPI = 120
 FIGURE_SIZE = (9.0, 5.0)
 
