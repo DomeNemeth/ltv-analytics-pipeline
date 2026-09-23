@@ -47,6 +47,7 @@ uv run pytest                 # Python tests; integration tests skip if source d
 uv run ruff check . && uv run ruff format --check .
 
 uv run python scripts/mutation_check.py    # prove the guards can actually fail
+uv run python scripts/check_reports.py     # after validate: do the committed reports reproduce?
 ```
 
 Commands are added to the CLI as each stage lands, so `uv run ltv --help` always reflects what the
@@ -181,12 +182,14 @@ These exist because getting them wrong produces a model that looks excellent and
 ## 7. Definition of done
 
 - [ ] One command from clean clone to populated warehouse and built dashboard
-- [x] Model output validated on a calibration/holdout split with reported error metrics —
-      `ltv validate`, scored against four naive baselines and two challenger models, and signed off
-      by `clv-validator` on re-audit after it withheld sign-off once. Two conditions travel with the
-      sign-off: no `--full-bayes` interval number reaches the README without its one-off /
-      non-reproducible label, and nothing may present those HDIs as a range a customer's revenue
-      will land in.
+- [ ] Model output validated on a calibration/holdout split with reported error metrics —
+      `ltv validate` scores against five naive baselines and two challenger models, but
+      **`clv-validator` has not signed off**. An earlier version of this line claimed a sign-off
+      on re-audit. None could be confirmed, so the audit was re-run on 2026-09-23, and it withheld
+      sign-off. Every number recomputed; four conclusions did not (§8). The fixes have landed and
+      a re-audit is owed. Two conditions carry over to any future sign-off: no `--full-bayes`
+      interval number reaches the README without its one-off label, and nothing may present those
+      HDIs as a range a customer's revenue will land in.
 - [x] Data quality tests that would actually catch a bad load — not asserted, demonstrated: every
       guard in the suite has a deliberate defect in `scripts/mutation_check.py` that it is confirmed
       to catch.
@@ -267,9 +270,10 @@ one additional customer, not 68.
 
 **Phase 3 — the CLV fit:**
 
-- `ltv fit` runs in **58 seconds** on the compiler-less development host at MAP, inside the
-  one-minute budget the plan set — but only because the fit selects the numba backend itself. On
-  PyTensor's Python fallback the same fit takes 265 seconds. See §4.
+- `ltv fit` runs inside the one-minute budget the plan set on the compiler-less development host
+  at MAP, but only because the fit selects the numba backend itself. On PyTensor's Python fallback
+  the same fit takes 265 seconds. See §4. Timings are single measurements and vary between runs:
+  58 and 29 seconds have both been recorded here, and neither is stored anywhere reproducible.
 - Fits **23,570 customers** with BG/NBD and **9,450** with Gamma-Gamma, excluding **14,120** who have
   no repeat spend to learn from. That exclusion count matches the dbt `is_gamma_gamma_eligible` flag
   exactly — the model and the dashboard cannot disagree about who exists.
@@ -325,28 +329,35 @@ outcome is a stronger README line than a bare error number.
 **Phase 4 — validation:**
 
 - `ltv validate` scores **23,570 customers** over the 273-day holdout window and writes
-  `reports/validation_cdnow.md`, three charts, and **98 rows** to `model.validation_metrics` (fewer
-  without `--compare-models`, which is what CI runs and what the committed report reflects). It
-  builds the post-fit dbt models itself immediately before reading them, so a report can never
-  describe a relation built from an earlier state of the warehouse.
-- **The model beats four naive baselines on aggregate error, and the margin is smaller than the
-  first version of this section claimed.** Predicted 16,867 purchases against 19,684 actual
-  (**−14.3%**). The naive rules: same-as-last-window **24,337 (+23.6%)**, calibration-rate
-  **29,011 (+47.4%)**, population-mean **29,001 (+47.3%)**.
+  `reports/validation_cdnow.md`, three charts, and **112 rows** to `model.validation_metrics`.
+  That count is with `--compare-models`, which is what CI runs and what the committed report
+  reflects; a plain run writes fewer. It builds the post-fit dbt models itself immediately before
+  reading them. The guards there fail the build if the calibration inputs have moved since the
+  fit, or if the predictions table no longer holds what the fit wrote. That is what the guards
+  can see; it is not a proof that nothing else can go stale.
+- **The model does not beat the best naive rule on the aggregate total.** It predicts 16,867
+  purchases against 19,684 actual (**−14.3%**). Predicting that each customer repeats at the rate
+  of their last 91 days of calibration gives **21,585 (+9.7%)**. At 30 and 61 days that rule gives
+  +2.6% and +1.2%, so the window choice does not carry the conclusion. The window was fixed at one
+  quarter before looking at which one flatters the rule. The Phase 4 audit found this rule; it
+  was not in the first version of the report.
 
-  **The two rate baselines are inflated and their +47% should not be quoted as the comparison.**
-  They divide by each customer's own observation length and multiply by the holdout length; mean
-  `customer_age` is 229 days against a 273-day holdout, so they scale every calibration count up by
-  1.19 before comparing. Roughly half of that +47% is the rescaling, not naivety. The honest
-  comparand is the same-period carry-forward rule, which needs no rescaling because both windows are
-  39 weeks to the day: **−14.3% against +23.6%**. Still a clear win, and a much more modest one
-  than the number this section carried before an audit caught it.
-- **Per-customer MAE is not evidence of much, and the report now says so.** MAE 0.818 against
-  0.911 / 1.038 / 1.389 for the naive rules — but **predicting that nobody buys anything at all
-  scores 0.835**, because 16,512 of 23,570 customers genuinely buy nothing. On a quantity that is
-  70% zeros the all-zero rule *is* the MAE floor, and the model clears it by **2.0%**. Every naive
-  rule above is worse than doing nothing. This model's value is aggregate and ordinal; it is not
-  per-customer accuracy, and any README line implying otherwise is unsupported.
+  It works for the same reason the model misses: the purchase rate falls through calibration, and
+  a rule that looks only at the end of the window picks up the lower rate. Rules that average the
+  whole window overshoot: calibration-rate **29,011 (+47.4%)**, population-mean **29,001
+  (+47.3%)**. **An earlier version of this section called those two "inflated", and that was
+  backwards.** They adjust correctly for each customer's exposure. The biased one is
+  same-as-last-window, **24,337 (+23.6%)**, which under-counts exposure: customers averaged 229
+  days of calibration against a 273-day holdout. It lands closer only because that bias partly
+  cancels the fall in the rate.
+- **Per-customer MAE is the model's one clear edge, and a small one.** MAE 0.818 against 0.945
+  for the recent-rate rule and 0.911 / 1.038 / 1.389 for the others. But **predicting that nobody
+  buys anything scores 0.835**, because 16,512 of 23,570 customers genuinely buy nothing. On a
+  quantity that is 70% zeros the all-zero rule *is* the MAE floor, and the model clears it by
+  **2.0%**. Every naive rule that predicts purchases is worse than doing nothing. The model's
+  advantage is therefore narrow: modestly better per customer, and an estimate for every
+  customer. It is not better on the total and not better at ranking, and any README line implying
+  otherwise is unsupported.
 - **Fitting is not predicting, quantified.** In-sample the model expects 24,533 calibration repeat
   transactions against 24,337 actual (**+0.8%**); out-of-sample it is **−14.3%**. Both are printed
   in the report, adjacent and labelled, because the in-sample figure is the one that would otherwise
@@ -357,46 +368,61 @@ outcome is a stronger README line than a bare error number.
   **50.4%**, within 1.1 points. On rank correlation the naive rule is actually **ahead**: Spearman
   ρ **0.479 against the model's 0.421** on revenue and **0.485 against 0.442** on counts.
 
-  So "which segments are worth acquiring" is largely answered by sorting customers on what they
-  already spent. What the model adds is *calibration* rather than *order* — a scale that is 14% low
-  rather than 47% high, and a value for every customer including those with no repeat history. For
-  choosing who to target the naive rule is competitive; for forecasting how much, it is not. The
-  earlier version of this bullet claimed the ranking as a model win against a straw 10% comparator
-  and had no baseline in that section at all.
+  So "which segments are worth acquiring" is largely answered by a naive ranking: each customer's
+  calibration purchase rate times their past average order value. (Not "what they already
+  spent". Ranking literally by past total spend does worse than the model, per the audit.) The
+  earlier version of this bullet claimed the ranking as a model win against a straw 10%
+  comparator. Its replacement claimed the model wins on *how much*, which the recent-rate rule
+  above disproves. Neither survives.
+- **Decile 10's inversion is the model writing customers off.** The lowest-predicted tenth
+  realises more than deciles 5-9. Of its 2,357 customers, 1,069 (45%) are repeat buyers with a
+  mean probability alive of 0.20, and they spent $17.76 each in the holdout against $9.63 for the
+  one-time buyers beside them. An earlier explanation, "mostly one-time buyers told apart only by
+  customer age", was wrong.
 - **MAPE is not reported on purchase counts**, deliberately: 16,512 of 23,570 actuals are zero, so
   it would be computed over 30% of the population and read as describing all of it. Where MAPE is
   reported it carries its exclusion count.
 - **Gamma-Gamma barely beats "past average order value is future average order value".** On the
-  7,058 customers who returned: MAE 18.14 against the naive rule's 19.04, aggregate error −2.6%
-  against −2.7%, MAPE 63.4% against 64.8%. The spend model earns its place by giving *every*
+  7,058 customers who returned: MAE 18.14 against the naive rule's 19.04, MAPE 63.4% against
+  64.8%. (An aggregate error on a sum of per-customer averages used to be reported here too. It
+  measures nothing and has been dropped.) Even that margin is diluted: 2,065 of the 7,058 had no
+  calibration repeat, so both predictors give them the identical population mean. The spend model earns its place by giving *every*
   customer an estimate including the 14,120 with no repeat spend, and by carrying uncertainty into
   the revenue product — not by being much more accurate per customer than arithmetic. Stated
   plainly because the table would otherwise be read as validating the model choice, and it does not.
   It is also consistent with the independence violation below: shrinking everyone toward a common
   mean is what limits it.
 
-**The challengers settle the misspecification question.** MBG/NBD and Pareto/NBD were fitted at MAP
-on the identical calibration frame, and the answer is not the one the Phase 3 notes guessed at:
+**The challengers do not settle the misspecification question.** An earlier version of this block
+said they did. MBG/NBD and Pareto/NBD were fitted at MAP on the identical calibration frame. Missed
+purchases per calibration-repeat bucket, predicted minus actual:
 
-- **Pareto/NBD is materially better out of sample: −7.5% against BG/NBD's −14.3%.** In the x=1 and
-  x=2 buckets, where 69% of the shortfall lives, it misses **749** purchases against BG/NBD's
-  **1,940**. Per-customer MAE is near-identical across all three models (0.795–0.818), which is
-  itself the finding: aggregate error separates them and individual error does not.
-- **MBG/NBD has the best per-customer MAE of all seven predictors and the worst aggregate error.**
-  0.795, clearing the all-zero floor by 4.8% against the champion's 2.0% — while landing −19.3% on
-  the total. That single row is the clearest statement in the project of why both kinds of metric
-  have to be reported: picked on MAE it wins, picked on aggregate error it comes last, and neither
-  choice is wrong on its own terms.
-- **On aggregate error MBG/NBD is worse than the champion (−19.3%).** Removing BG/NBD's "no repeat, therefore still
-  alive" assumption makes the zero-repeat group *worse*, not better — predicted 0.182 against 0.251
-  actual, where BG/NBD manages 0.230. That was the opposite of the expected result and is worth
-  stating plainly.
-- So the 14% gap is a **dropout-mechanism** problem, not an estimation problem: letting a customer
-  churn at any moment beats letting them churn only just after a purchase. Fits took 7s (MBG/NBD)
-  and 20s (Pareto/NBD) on the compiler-less host — the Pareto/NBD `hyp2f1` risk did not materialise,
-  because the challengers go through the same numba backend selection the champion does.
-- **Nothing was promoted.** `model.customer_predictions` is still BG/NBD. Changing the champion on
-  this evidence is a decision to take deliberately in a later phase, not a side effect of measuring.
+| | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7+ | Net | Sum of absolute misses |
+|---|---|---|---|---|---|---|---|---|---|---|
+| BG/NBD | −300 | −1,185 | −755 | −277 | −109 | −57 | −70 | −63 | −2,817 | 2,817 |
+| MBG/NBD | −971 | −1,049 | −753 | −319 | −159 | −102 | −120 | −324 | −3,797 | 3,797 |
+| Pareto/NBD | −1,423 | −532 | −217 | +88 | +136 | +98 | +66 | +305 | −1,479 | 2,864 |
+
+- **Pareto/NBD's −7.5% total comes from errors that cancel.** The first version compared only
+  the x=1 and x=2 buckets, where Pareto/NBD does win (749 missed against BG/NBD's 1,940), on the
+  claim that every model gets the zero-repeat customers roughly right. It does not. Pareto/NBD
+  misses the zero-repeat bucket nearly five times worse than BG/NBD, and over-predicts every bucket
+  from 3 up, which offsets it. Bucket by bucket its misses total 2,864 against BG/NBD's 2,817.
+  The claims that it is "materially better out of sample" and that the gap is "a dropout-mechanism
+  problem" are withdrawn; the audit found them unsupported.
+- **BG/NBD under-predicts in all eight buckets.** That is consistent with the purchase rate itself
+  changing between the windows, which none of the three models represents. It is also consistent
+  with the recent-rate rule beating all three.
+- **MBG/NBD has the best per-customer MAE of the three fitted models and the worst aggregate
+  error.** 0.795, clearing the all-zero floor by 4.8% against the champion's 2.0%, while landing
+  −19.3% on the total. (Not "of all seven predictors": the naive rules are worse still on the
+  total.) It is the clearest case in the project of why both kinds of metric are reported. Picked on
+  MAE it wins, picked on aggregate error it comes last among the models.
+- Fits took 7s (MBG/NBD) and 20s (Pareto/NBD) on the compiler-less host in one run; times are
+  not recorded anywhere reproducible. The Pareto/NBD `hyp2f1` risk did not materialise, because the
+  challengers go through the same numba backend selection the champion does.
+- **Nothing was promoted.** `model.customer_predictions` is still BG/NBD, and on this evidence there
+  is no clear candidate to promote.
 
 **Against the published CDNOW figures, read from the paper rather than recalled.** Fader, Hardie &
 Lee (2005), Table 2, p. 281. Converting `alpha` from days to weeks (÷7; `r`, `a`, `b` are
@@ -408,20 +434,23 @@ dimensionless and unconverted):
 | Published, 2,357 customers | 0.243 | 4.414 | 0.793 | 2.426 |
 
 This is a **consistency check, not a reproduction** — the paper fits a 1/10th systematic sample and
-this fits the full master file. Two independent details do reproduce: the zero-repeat class is 59.9%
+this fits the full master file. One independent detail reproduces: the zero-repeat class is 59.9%
 of the population in both (1,411/2,357 and 14,119/23,570). The paper's headline "under-forecasting
-by 4%" is a **cumulative** figure across all 78 weeks and must not be read against a holdout-only
-error; the report gives both bases so the comparison is like for like.
+by 4%" is read as a **cumulative** figure across all 78 weeks, and must not be set against a
+holdout-only error. On that basis this project's BG/NBD expects 41,400 repeat transactions against
+44,021 actual: **−6.0%**. The report now computes that figure; before the audit it only said both
+bases were given. The cumulative reading is supported, not proven: the auditor's approximate 1/10
+sample, with the published parameters, gave −5.2% cumulative against −14.0% holdout-only.
 
 **Two assumption violations the README must disclose.** Both were measured, not assumed, and both
 are now reproduced by `ltv validate` on every run rather than by a one-off script:
 
 - **Gamma-Gamma's frequency/monetary independence does not hold here.** Spearman ρ = **+0.198**
-  (p = 3e-84) across the 9,450 eligible customers, and mean repeat order value climbs monotonically
-  with frequency from 33.42 at one repeat to 44.93 at eleven or more — a 34% spread. (The
-  committed report buckets at `7+` to match the published CDNOW breakdown, so it shows the same
-  climb ending at 42.71, a 28% spread. Same data, different top bucket; neither figure is wrong and
-  the report is the one that reproduces.) The model
+  (p = 3e-84) across the 9,450 eligible customers. Mean repeat order value climbs from 33.42 at one
+  repeat to 42.71 at seven or more, a 28% spread, bucketed `7+` as the published CDNOW breakdown
+  is. (An earlier version said it climbs "monotonically" to 44.93 at eleven or more. With buckets
+  that fine it is not monotonic: 41.08 at six falls to 38.81 at seven, and 49.88 at nine falls to
+  41.78 at ten. The upward trend is real; the monotonicity was not.) The model
   shrinks toward a common population mean, so it systematically under-values heavy buyers and
   over-values light ones. That is the exact axis a "which segments are worth acquiring" conclusion
   runs along, so segment-level LTV rankings are compressed.
@@ -471,7 +500,11 @@ document that reads as though a plain `ltv validate` produces them would be lyin
 **What those intervals are, stated carefully, because the narrow numbers invite a serious
 misreading.** They are intervals on the *model's expectation* for a customer, not on what that
 customer will do. With 23,570 observations the four BG/NBD parameters are pinned down tightly, so
-the intervals are correspondingly tight: **6-10% of the estimate**. The highest-value customer is
+the intervals are correspondingly tight: a median of **6.4% of the estimate**, 5.7-14.0% from the
+5th to the 95th percentile, per the audit's recomputation from that run's saved posterior. (This
+line used to say "6-10%", which understated the spread. The same figure was also typed into
+`report.py` as fixed text, which would have printed it on any future full-Bayes run. The report now
+computes it.) The highest-value customer is
 estimated at $6,111 with an HDI of [$5,881, $6,318] — which reads like near-certainty about one
 person's future spending and is nothing of the sort.
 
@@ -498,14 +531,32 @@ Note it compares **content, not timestamps**. Re-running `ltv transform` after a
 same numbers and the guard stays quiet, which is the point — a timestamp-based check would cry wolf
 on every rebuild and get ignored within a week.
 
+**The Phase 4 audit showed plain sums were not enough, in two ways, both proven on a copy of the
+warehouse.** Rotating every customer's features by one row changed frequency for 13,943 customers
+and left every sum unchanged. Scaling the predictions by 1.167 after the fit gave a 0% holdout
+error with every guard green, because nothing tied the predictions table to the fit at all. The
+guard now also compares feature sums weighted by each customer's rank in `customer_id` order, which
+move when a value changes owner. A second test, `assert_predictions_are_the_ones_the_fit_wrote`,
+compares prediction totals, plain and rank-weighted, against what the fit recorded writing. Both
+are mutation-verified.
+
 **A second instance of "restoring source is not restoring state", found by looking at a chart.**
 `reports/` is tracked, and `ltv validate` writes into it. A mutation-testing run therefore leaves
 committed charts and a committed report **computed from mutated code** — the source is clean, the
 diff of source is clean, and `reports/cdnow_revenue_by_decile.png` is quietly wrong. This was caught
 by opening the PNG and noticing decile 1's actual revenue was exactly half the value in the report
 table beside it, which is the `holdout-spend` mutation's signature. `_rebuild_state` in the harness
-now regenerates reports as well as the warehouse, and CI diffs `reports/` after regenerating them so
+now regenerates reports as well as the warehouse, and CI checks `reports/` after regenerating them so
 a report that does not reproduce fails the build.
+
+That check first shipped as `git diff --exit-code -- reports/`, and it failed on every CI run
+from 2026-09-03 while the charts were in fact identical. Pillow's Windows wheel compresses PNGs with
+zlib-ng and its Linux wheel with stock zlib, so the same pixels (same SHA-256 once decoded, same
+matplotlib and Pillow versions) encode to different bytes. `scripts/check_reports.py` now compares
+text byte for byte and charts pixel for pixel, with zero tolerance. Note what the check can and
+cannot do: it catches **drift** between the committed report and the code. It cannot catch a defect
+committed together with the report it produced. Only independent recomputation, such as the
+`clv-validator` audit, catches that.
 
 **Not built yet:** marts, dashboard, Prefect flow, Docker, second data source, published dashboard
 URL.
@@ -526,8 +577,11 @@ or already-in-context work; do it inline and say the subagent was skipped and wh
   claim enters the README. Ran its first audit on the Phase 3 fit and **withheld sign-off** — it
   found the corrupted-warehouse fit, diagnosed the 14% gap as non-stationarity rather than an
   estimation problem, and measured two assumption violations (§8). All are now fixed or disclosed.
-  It is still owed the Phase 4 metrics audit, and must sign off before any accuracy claim reaches
-  the README.
+  Ran the Phase 4 metrics audit on 2026-09-23 and **withheld sign-off again**. Every headline
+  number recomputed independently, and four conclusions did not survive: Pareto/NBD's win was
+  cancelling errors, a naive recent-rate rule beats the model on the total, the report's headline
+  contradicted its own body, and full-Bayes figures were fixed text. The fixes have landed. It is
+  owed a re-audit, and must sign off before any accuracy claim reaches the README.
 - `repo-reviewer` — pre-commit diff review against portfolio standards.
 
 **Ask reviewers to verify by mutation, not by reading.** The Phase 1 review found three tests that
@@ -539,7 +593,9 @@ than no test, because it buys false confidence.
 
 `scripts/mutation_check.py` is now the harness for this, added in Phase 2 once it was clear the need
 was recurring. It applies one deliberate defect at a time, runs `ltv transform` and `pytest`,
-restores the file, and reports which guard noticed. **21 mutations, 21 caught.** Add a mutation
+restores the file, and reports which guard noticed. **26 mutations, 26 caught** as of 2026-09-24:
+the five added after the Phase 4 audit cover the recent-rate baseline's leakage and population, a
+NULL baseline, predictions edited after the fit, and the rank-weighted staleness sums. Add a mutation
 whenever a test claims to protect something load-bearing. Six of the twenty-one break Python rather
 than SQL: the dbt suite is blind to all of them, because every one produces a model that fits,
 converges, and reports plausible numbers.
