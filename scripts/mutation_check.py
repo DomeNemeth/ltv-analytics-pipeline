@@ -315,6 +315,54 @@ MUTATIONS = (
         checks=("ltv transform", "ltv fit", "ltv validate", "pytest"),
         guard="assert_predictions_match_the_current_calibration_inputs (weighted sums)",
     ),
+    # --- Added after the Phase 4 re-audit, which got each of these past every guard on a copy.
+    Mutation(
+        name="horizon-labels-swapped",
+        path="src/ltv/models/store.py",
+        old="        return _replace_rows_for_sources(connection, PREDICTIONS_TABLE, predictions)",
+        new=(
+            "        return _replace_rows_for_sources(connection, PREDICTIONS_TABLE, "
+            "predictions.assign(horizon_days="
+            "predictions['horizon_days'].map({273: 365, 365: 273})))"
+        ),
+        # The 365-day forecast scored against the 273-day holdout: the model looks 8.8% high
+        # instead of 14.3% low, and would appear to beat the recent-rate rule.
+        checks=("ltv transform", "ltv fit", "ltv validate", "pytest"),
+        guard="assert_predictions_are_the_ones_the_fit_wrote (horizon-weighted sums)",
+    ),
+    Mutation(
+        name="revenue-reassigned",
+        path="src/ltv/models/store.py",
+        old="        return _replace_rows_for_sources(connection, PREDICTIONS_TABLE, predictions)",
+        new=(
+            "        return _replace_rows_for_sources(connection, PREDICTIONS_TABLE, "
+            "predictions.assign(expected_forward_revenue=predictions.groupby('horizon_days')"
+            "['expected_forward_revenue'].transform(lambda v: v.to_numpy()[::-1])))"
+        ),
+        # Same totals, wrong customers: the decile table and revenue ranking become meaningless.
+        checks=("ltv transform", "ltv fit", "ltv validate", "pytest"),
+        guard="assert_predictions_are_the_ones_the_fit_wrote (rank-weighted revenue)",
+    ),
+    Mutation(
+        name="probability-alive-overwritten",
+        path="src/ltv/models/store.py",
+        old="        return _replace_rows_for_sources(connection, PREDICTIONS_TABLE, predictions)",
+        new=(
+            "        return _replace_rows_for_sources(connection, PREDICTIONS_TABLE, "
+            "predictions.assign(probability_alive=1.0))"
+        ),
+        checks=("ltv transform", "ltv fit", "ltv validate", "pytest"),
+        guard="assert_predictions_are_the_ones_the_fit_wrote (probability_alive sums)",
+    ),
+    Mutation(
+        name="sensitivity-scaled",
+        path="dbt/models/intermediate/int_baselines__recent_window_sensitivity.sql",
+        old="        ) as predicted_purchases",
+        new="        ) * 1.5 as predicted_purchases",
+        # The report's sentence about the window is computed from this relation. Scaled, it
+        # could say anything, and its only test counted rows.
+        guard="assert_recent_window_sensitivity_matches_the_scored_baseline",
+    ),
 )
 
 #: Every check the harness can run, in the order a real user would.
