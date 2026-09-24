@@ -1,15 +1,17 @@
 -- How much the recent-run-rate baseline depends on the length of its look-back window.
 --
--- The scored model uses one window (var recent_window_days, 91 days). Picking that window after
--- seeing which one beats the model would be cherry-picking, and a reader cannot tell a tuned
--- window from a principled one by looking at a single number. So the same rule is also totalled
--- at roughly one, two and three months. If the conclusion changed across these, the report would
--- have to say so.
+-- The scored model uses one window (var recent_window_days, 91 days). A single number cannot show
+-- whether a window was tuned, so the same rule is also totalled at one to nine months. The
+-- first version stopped at three months and claimed the conclusion did not depend on the window.
+-- The Phase 4 re-audit extended it: from about four months back the rule loses to the model. The
+-- range now runs out to the full calibration length, where the rule meets the calibration-rate
+-- baseline, so the report can compute where the crossover falls instead of asserting it.
 --
 -- Aggregate only, one row per (source, window_days). Per-customer scoring stays in
 -- int_customers__scored, for the configured window alone.
+-- assert_recent_window_sensitivity_matches_the_scored_baseline ties the two together.
 
-{% set windows = [30, 61, 91] %}
+{% set windows = [30, 61, 91, 122, 152, 182, 273] %}
 {% if var('recent_window_days') | int not in windows %}
     {% do windows.append(var('recent_window_days') | int) %}
 {% endif %}

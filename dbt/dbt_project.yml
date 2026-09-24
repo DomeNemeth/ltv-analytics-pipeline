@@ -22,8 +22,10 @@ vars:
   holdout_weeks: 39
 
   # Look-back for the recent-run-rate baseline: one quarter, ending on the calibration cutoff.
-  # Fixed on conventional grounds before looking at which window flatters the rule most. See
-  # macros/recent_repeats.sql and int_baselines__recent_window_sensitivity.
+  # Chosen *after* the Phase 4 audit had reported 30, 61 and 91 days, so it is not a blind choice.
+  # It is the least favourable of those three to the rule. The rule's dependence on the window
+  # is reported, not hidden: int_baselines__recent_window_sensitivity totals it from 30 to 273
+  # days, and the report states where it stops beating the model.
   recent_window_days: 91
 
 models:

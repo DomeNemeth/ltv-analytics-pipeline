@@ -1,10 +1,11 @@
 """Fit alternative purchase models on the same frame, to find out whose fault the error is.
 
-Phase 3's BG/NBD fit under-predicts holdout purchases by 14%, and that gap has already been
-diagnosed: it is not MAP, not the priors, and not an apples-to-oranges comparison. Monthly repeat
-occasions fall ~40% through the calibration window and then *plateau* through the holdout, and
-BG/NBD can only explain a decline as dropout, so it extrapolates a decay the real cohort stops
-doing. That is model misspecification.
+Phase 3's BG/NBD fit under-predicts holdout purchases by 14%. That gap has been narrowed down:
+it is not MAP, not the priors, and not an apples-to-oranges comparison. Monthly repeat occasions
+fall ~40% through the calibration window and keep falling through the holdout, more slowly than
+BG/NBD expects, and the shortfall bunches in a few months. (An earlier version of this docstring
+said the holdout "plateaus". The Phase 4 re-audit measured it, and it does not.) BG/NBD can only
+explain a decline as dropout, so some misspecification is expected.
 
 The way to test that claim rather than assert it is to fit models that make different assumptions
 about dropout and see whether the error moves:

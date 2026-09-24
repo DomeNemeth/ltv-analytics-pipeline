@@ -33,7 +33,7 @@ QUANTITY_TITLES = {
 
 FAMILY_LABELS = {
     CHAMPION: "BG/NBD + Gamma-Gamma",
-    "baseline_recent": "Naive: last quarter's rate",
+    "baseline_recent": "Naive: recent rate",
     "baseline_carry_forward": "Naive: same as last window",
     "baseline_rate": "Naive: calibration rate",
     "baseline_flat": "Naive: population mean",
@@ -148,25 +148,40 @@ def _required(result: ValidationResult, family: str, quantity: str) -> Score:
 
 
 def _sensitivity_sentence(result: ValidationResult, model_error: float) -> str:
-    """Say whether the recent rule's result depends on its window, from the sensitivity relation."""
+    """Say how far the recent rule's result depends on its window, computed from the sensitivity.
+
+    Two earlier versions of this sentence were wrong, and the Phase 4 re-audit caught both. One
+    said the window was "fixed before looking at results". It was chosen after the first audit had
+    reported 30, 61 and 91 days. The other said the conclusion "does not depend on the choice",
+    which held only because the sensitivity stopped at three months. It now runs to the full
+    calibration length, and the crossover is computed.
+    """
     table = result.recent_sensitivity
-    others = table[table["window_days"] != result.recent_window_days]
-    if others.empty:
+    if table.empty:
         return ""
     listed = ", ".join(
-        f"{int(row.window_days)} days {row.percent_error:+.1f}%" for row in others.itertuples()
+        f"{int(row.window_days)} days {row.percent_error:+.1f}%" for row in table.itertuples()
     )
-    robust = bool((table["percent_error"].abs() < abs(model_error)).all())
-    return (
-        f" The window is one quarter, fixed before looking at results. Other windows give "
-        f"{listed}, so "
-        + (
-            "every window tested lands closer than the model and the conclusion does not depend "
-            "on the choice."
-            if robust
-            else "the result depends on the window chosen and should be read with that in mind."
+    beats = table["percent_error"].abs() < abs(model_error)
+    chosen = (
+        f" The {result.recent_window_days}-day window was chosen after an audit had reported "
+        f"30, 61 and 91 days, not blind; it is the least favourable of those three to the rule."
+    )
+    if beats.all():
+        verdict = "every window tested lands closer than the model."
+    elif not beats.any():
+        verdict = "no window tested lands closer than the model."
+    elif beats.is_monotonic_decreasing:
+        longest = int(table.loc[beats, "window_days"].max())
+        shortest_losing = int(table.loc[~beats, "window_days"].min())
+        verdict = (
+            f"**the rule beats the model only with a look-back of {longest} days or less.** From "
+            f"{shortest_losing} days on, the model's total is closer. The result is about the "
+            f"most recent months of behaviour, not about recent-rate rules in general."
         )
-    )
+    else:
+        verdict = "whether the rule beats the model depends on the window, with no clean cut-off."
+    return chosen + f" Across look-backs of {listed}, " + verdict
 
 
 def _headline(result: ValidationResult) -> list[str]:
@@ -251,18 +266,39 @@ def _headline(result: ValidationResult) -> list[str]:
         f"holdout, and that bias partly cancels the fall in the rate.",
         "",
         f"On per-customer error the model {verdict}: MAE {purchases.mae:.3f}, against "
-        f"{recent.mae:.3f} for the last-quarter rule and {carry.mae:.3f}, {rate.mae:.3f} and "
+        f"{recent.mae:.3f} for the last-{result.recent_window_days}-day rule and "
+        f"{carry.mae:.3f}, {rate.mae:.3f} and "
         f"{flat.mae:.3f} for the others. **Read it against predicting that nobody buys anything, "
         f"which scores {zero.mae:.3f}**, because {result.non_returners:,} of these customers "
         f"genuinely buy nothing. On a mostly-zero quantity that is the real floor, and the model "
         f"clears it by {100 * (zero.mae - purchases.mae) / zero.mae:.1f}%.",
         "",
         f"So the model's measurable advantage is narrow. Per customer it is modestly better than "
-        f"the naive rules. It gives every customer an estimate, including those with no repeat "
-        f"history. It also gives a structural account of why it misses. It is "
-        f"{'not ' if closer else ''}more accurate on the total, {ranking}.",
+        f"the naive rules. {_zero_repeat_sentence(result)}It also gives a structural account of "
+        f"why it misses. It is {'not ' if closer else ''}more accurate on the total, {ranking}.",
         "",
     ]
+
+
+def _zero_repeat_sentence(result: ValidationResult) -> str:
+    """What the model offers customers with no repeat history, measured on the zero bucket.
+
+    An earlier version said the model "gives every customer an estimate". So does every naive
+    rule. The real difference is that each naive rule gives these customers either zero or one
+    figure shared by everybody, while the model gives them an individual, non-zero estimate. It
+    is only worth saying if that estimate is close to what they did, so it is printed against the
+    actual.
+    """
+    zero = result.buckets[result.buckets["bucket"] == "0"]
+    if zero.empty:
+        return ""
+    row = zero.iloc[0]
+    return (
+        f"For the {int(row['customers']):,} customers with no repeat history, every naive rule "
+        f"predicts either zero or one figure shared by everybody. The model gives each of them "
+        f"an individual estimate, averaging {row[CHAMPION]:.3f} purchases against "
+        f"{row['actual']:.3f} actual. "
+    )
 
 
 def _in_sample_section(result: ValidationResult) -> list[str]:
@@ -353,6 +389,62 @@ def _buckets_section(result: ValidationResult) -> list[str]:
             ]
         )
     return lines
+
+
+#: How many of the worst months the shortfall-concentration sentence names.
+WORST_MONTHS = 3
+
+
+def _monthly_lines(result: ValidationResult) -> list[str]:
+    """Month-by-month actual against expected, and what the pattern does and does not show.
+
+    Replaces a sentence that said the model "keeps decaying at the calibration pace". The re-audit
+    measured it and that was wrong: the model's decline across the holdout is steeper than the
+    realised one, but far shallower than the calibration fall. So the text states the two rates
+    and where the shortfall bunches, computed from the table.
+    """
+    monthly = result.monthly
+    if monthly.empty or len(monthly) < 2:
+        return []
+
+    first, last = monthly.iloc[0], monthly.iloc[-1]
+    model_change = last["expected"] / first["expected"] - 1
+    actual_change = last["actual"] / first["actual"] - 1
+    shortfall = monthly["shortfall"].sum()
+    worst = monthly.nsmallest(WORST_MONTHS, "shortfall")
+    worst_share = worst["shortfall"].sum() / shortfall if shortfall else float("nan")
+    worst_names = ", ".join(month.strftime("%b %Y") for month in worst["month"].sort_values())
+
+    display = monthly.assign(month=monthly["month"].dt.strftime("%b %Y")).rename(
+        columns={
+            "month": "Month",
+            "actual": "Actual",
+            "expected": "Expected",
+            "shortfall": "Expected − actual",
+        }
+    )[["Month", "Actual", "Expected", "Expected − actual"]]
+
+    return [
+        "BG/NBD can only explain a falling purchase rate as customers dropping out, so it carries "
+        "a decline forward. Holdout purchases by month, against the model's expectation for the "
+        "same months:",
+        "",
+        _table(display, {"Actual": 0, "Expected": 0, "Expected − actual": 0}),
+        "",
+        f"From the first holdout month to the last, the model's expectation changes by "
+        f"{model_change:+.1%} and the realised count by {actual_change:+.1%}. "
+        + (
+            "The model's decline is steeper than the cohort's, but that is not the whole story. "
+            if model_change < actual_change
+            else "The realised decline is at least as steep as the model's, so an extrapolated "
+            "decline does not explain the shortfall. "
+        )
+        + f"The shortfall is uneven: {worst_names} hold "
+        f"{worst_share:.0%} of it. None of the three models has a seasonal term, so a seasonal "
+        f"pattern would show up exactly like this. A single year of holdout cannot confirm that it "
+        f"is seasonal.",
+        "",
+    ]
 
 
 def bucket_misses(buckets: pd.DataFrame) -> pd.DataFrame:
@@ -832,18 +924,10 @@ def write_report(
             [
                 "### Why the model falls short",
                 "",
-                "BG/NBD can only explain a falling purchase rate as customers dropping out, so it "
-                "extrapolates the calibration decline forward. The realised series falls steeply "
-                "through calibration, then keeps falling through the holdout but more slowly, "
-                "with a rebound in the fourth quarter. The model keeps decaying at the "
-                "calibration pace; the cohort does not.",
-                "",
-                "Read the first three months as cohort formation rather than growth: every "
-                "customer in this dataset makes their first purchase in Q1 1997, so the repeat "
-                "series necessarily climbs while the cohort is still being acquired. The part that "
-                "matters is what happens after it: a steep fall to the cutoff, then a slower "
-                "decline and a fourth-quarter rebound that looks seasonal. Neither the change of "
-                "pace nor seasonality is something the three models here can represent.",
+                *_monthly_lines(result),
+                "Read the first three months of the chart as cohort formation rather than "
+                "growth: every customer in this dataset makes their first purchase in Q1 1997, so "
+                "the repeat series necessarily climbs while the cohort is still being acquired.",
                 "",
                 f"![Repeat occasions per month]({charts[1].name})",
                 "",

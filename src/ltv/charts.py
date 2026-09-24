@@ -5,9 +5,10 @@ Three figures, chosen because each answers a question a table cannot:
 1. **Holdout purchases by calibration frequency** -- the canonical CLV validation chart. Where does
    the error live? An aggregate number says a model is 14% low; this says the shortfall is
    concentrated in customers who repeated once or twice.
-2. **Monthly repeat occasions** -- why the error exists. The calibration window declines steeply and
-   the holdout window flatly does not, which is a violated stationarity assumption rather than a
-   parameter estimated badly. This is the figure that turns "our model is 14% off" into a diagnosis.
+2. **Monthly repeat occasions** -- where the error comes from in time. The calibration window
+   declines steeply, and the holdout keeps declining more slowly than the model expects, with the
+   shortfall bunched in a few months. The model's monthly expectation is drawn beside the actuals
+   so that gap is visible, rather than asserted.
 3. **Revenue by predicted decile** -- whether the ranking is usable. The project's business question
    is which segments to acquire, which is about order, not magnitude.
 
@@ -101,12 +102,14 @@ def purchases_by_frequency(result: ValidationResult, path: Path) -> Path:
     return _save(pyplot, figure, path)
 
 
-def monthly_occasions(source: str, path: Path, settings: Settings) -> Path:
-    """Repeat purchase occasions per month, with the calibration cutoff marked.
+def monthly_occasions(result: ValidationResult, path: Path, settings: Settings) -> Path:
+    """Repeat purchase occasions per month, with the model's holdout expectation beside them.
 
     The diagnostic figure. BG/NBD explains a declining purchase rate as customers dropping out, and
-    extrapolates the decline forward. If the real series declines and then levels off, the model
-    keeps decaying and the forecast falls short -- which is a violated assumption, not a bad fit.
+    carries the decline forward. The model's own monthly expectation is drawn over the holdout, so
+    the gap is visible month by month. The first version drew only the actuals, labelled the
+    holdout line "predicted", and titled the chart "the decline stops after the cutoff". The
+    Phase 4 re-audit found all three wrong.
 
     Read straight from the occasion grain rather than from any summary, so it cannot inherit a
     windowing mistake from the models it is being used to explain.
@@ -146,7 +149,7 @@ def monthly_occasions(source: str, path: Path, settings: Settings) -> Path:
             group by 1
             order by 1
             """,
-            [source],
+            [result.source],
         ).df()
 
     pyplot, figure, axes = _figure()
@@ -162,7 +165,7 @@ def monthly_occasions(source: str, path: Path, settings: Settings) -> Path:
     axes.plot(
         holdout["month"],
         holdout["occasions"],
-        label="Holdout window (predicted)",
+        label="Holdout window (actual)",
         color="#1f77b4",
         marker="o",
         linewidth=2.2,
@@ -172,10 +175,20 @@ def monthly_occasions(source: str, path: Path, settings: Settings) -> Path:
         bridge = pd.concat([calibration.tail(1), holdout.head(1)])
         axes.plot(bridge["month"], bridge["occasions"], color="#1f77b4", linewidth=2.2)
         axes.axvline(holdout["month"].iloc[0], color="#d62728", linestyle="--", alpha=0.7)
+    if not result.monthly.empty:
+        axes.plot(
+            result.monthly["month"],
+            result.monthly["expected"],
+            label="Holdout window (BG/NBD expected)",
+            color="#1f77b4",
+            linestyle="--",
+            marker="s",
+            linewidth=1.6,
+        )
 
     axes.set_xlabel("Month")
     axes.set_ylabel("Repeat purchase occasions")
-    axes.set_title(f"Repeat occasions per month, {source} — the decline stops after the cutoff")
+    axes.set_title(f"Repeat occasions per month, {result.source}, and the model's expectation")
     axes.legend(frameon=False)
     axes.grid(axis="y", alpha=0.3)
     axes.set_ylim(bottom=0)
@@ -228,6 +241,6 @@ def write_charts(
 
     return (
         purchases_by_frequency(result, reports / f"{source}_purchases_by_frequency.png"),
-        monthly_occasions(source, reports / f"{source}_monthly_occasions.png", settings),
+        monthly_occasions(result, reports / f"{source}_monthly_occasions.png", settings),
         revenue_by_decile(result, reports / f"{source}_revenue_by_decile.png"),
     )

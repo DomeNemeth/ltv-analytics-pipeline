@@ -283,10 +283,12 @@ models:
 
   - name: int_baselines__recent_window_sensitivity
     description: >
-      The recent-run-rate baseline's predicted holdout total at look-back windows of 30, 61 and 91
-      days, plus the configured window if it is none of those. Shows whether the window choice
-      carries the conclusion. One row per (source, window_days), asserted by
-      assert_recent_window_sensitivity_grain.
+      The recent-run-rate baseline's predicted holdout total at look-back windows from 30 to 273
+      days, plus the configured window if it is none of those. Shows how far the rule's result
+      depends on the window; the report computes where it stops beating the model. One row per
+      (source, window_days) over the whole population, asserted by
+      assert_recent_window_sensitivity_is_complete. The configured window's row is tied to the
+      scored baseline by assert_recent_window_sensitivity_matches_the_scored_baseline.
     columns:
       - name: source
         data_tests: [not_null]

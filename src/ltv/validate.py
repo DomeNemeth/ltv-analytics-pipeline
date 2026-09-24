@@ -219,6 +219,8 @@ class ValidationResult:
     #: Holdout returners with no calibration repeat. The spend model and the naive order-value rule
     #: give them the identical population mean, so they dilute that comparison.
     order_value_shared_estimate: int = 0
+    #: Holdout purchases by month: month, expected, actual, shortfall. See monthly_holdout.
+    monthly: pd.DataFrame = field(default_factory=pd.DataFrame)
     challengers: tuple[ChallengerFit, ...] = field(default_factory=tuple)
 
     def score(self, family: str, quantity: str) -> Score | None:
@@ -327,6 +329,78 @@ def interval_summary(frame: pd.DataFrame) -> IntervalSummary | None:
         p95_relative_width=float(relative.quantile(0.95)),
         coverage=float(inside.mean()),
     )
+
+
+def monthly_holdout(
+    purchase_model, source: str, frame: pd.DataFrame, settings: Settings
+) -> pd.DataFrame:
+    """Actual and expected holdout purchases, month by month.
+
+    The report used to say the model "keeps decaying at the calibration pace". The Phase 4
+    re-audit measured the pace and found that wrong: the model's holdout decline is steeper than
+    the realised one, but far shallower than the calibration fall. It also found the shortfall
+    bunched in a few months. Both are now computed here from calendar months, rather than
+    described.
+
+    The expectation for a month is the model's conditional expected purchases up to the month's
+    end minus those up to its start, summed over customers. That uses the same call ``ltv fit``
+    uses for its forecast, so the monthly figures add up to the forecast being scored. This
+    function checks that they do. Actuals count every holdout occasion of a calibration customer,
+    the same definition as ``holdout_frequency``, and are checked against it too.
+    """
+    from ltv.models.clv import load_calibration
+
+    with connect(settings, read_only=True) as connection:
+        start, end = connection.execute(
+            "select holdout_start, holdout_end from int_sources__analysis_windows where source = ?",
+            [source],
+        ).fetchone()
+        actual = connection.execute(
+            """
+            select date_trunc('month', occasions.order_date) as month, count(*) as actual
+            from int_customers__purchase_occasions as occasions
+            inner join int_customers__rfm_calibration as calibration
+                on occasions.source = calibration.source
+                and occasions.customer_id = calibration.customer_id
+            where occasions.source = ? and occasions.order_date between ? and ?
+            group by 1
+            order by 1
+            """,
+            [source, start, end],
+        ).df()
+
+    start, end = pd.Timestamp(start), pd.Timestamp(end)
+    # Month boundaries inside the window, plus its two ends. A window that does not start on the
+    # first of a month gets a partial first month rather than a shifted one.
+    edges = sorted({start, end + pd.Timedelta(days=1)} | set(pd.date_range(start, end, freq="MS")))
+    purchase_frame = load_calibration(source, settings).purchase_frame
+    cumulative = [0.0] + [
+        float(
+            purchase_model.expected_purchases(data=purchase_frame, future_t=(edge - start).days)
+            .mean(dim=("chain", "draw"))
+            .sum()
+        )
+        for edge in edges[1:]
+    ]
+    expected = pd.DataFrame({"month": edges[:-1], "expected": np.diff(cumulative)})
+
+    table = expected.merge(
+        actual.assign(month=pd.to_datetime(actual["month"])), on="month", how="left"
+    ).fillna({"actual": 0})
+    table["actual"] = table["actual"].astype(int)
+    table["shortfall"] = table["expected"] - table["actual"]
+
+    if table["actual"].sum() != int(frame["holdout_frequency"].sum()) or not np.isclose(
+        table["expected"].sum(), frame["expected_purchases"].sum(), rtol=1e-6
+    ):
+        raise ValidationError(
+            "Monthly holdout figures do not add up to the scored totals: "
+            f"{table['actual'].sum()} actual against {frame['holdout_frequency'].sum()}, "
+            f"{table['expected'].sum():.1f} expected against "
+            f"{frame['expected_purchases'].sum():.1f}. A monthly table that does not reconcile "
+            f"describes a different forecast from the one being scored."
+        )
+    return table
 
 
 def lowest_decile(frame: pd.DataFrame) -> LowestDecile:
@@ -646,6 +720,7 @@ def run_validation(
         mean_customer_age=float(frame["customer_age"].mean()),
         lowest_decile=lowest_decile(frame),
         intervals=interval_summary(frame),
+        monthly=monthly_holdout(purchase_model, source, frame, settings),
         order_value_shared_estimate=int(
             ((frame["holdout_frequency"] > 0) & (frame["frequency"] == 0)).sum()
         ),

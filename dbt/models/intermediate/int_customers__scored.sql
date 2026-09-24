@@ -201,10 +201,11 @@ select
     -- This is the non-stationarity the report diagnoses, and it is not a model's to exploit, but
     -- it is available to anyone with the data, so it is the comparison the model has to face.
     --
-    -- The window is fixed at 91 days (one quarter) on conventional grounds, not on results. The
-    -- auditor measured 30, 61 and 91 days, and 91 is the least flattering to the rule of the
-    -- three. int_baselines__recent_window_sensitivity reports all three so a reader can see the
-    -- choice does not carry the conclusion.
+    -- The window is 91 days (one quarter), chosen after the auditor had measured 30, 61 and 91
+    -- days. It is the least favourable of the three to the rule, but it is not a blind choice.
+    -- The conclusion does depend on the window: from about four months back, the rule stops
+    -- beating the model. int_baselines__recent_window_sensitivity totals it from 30 to 273 days,
+    -- and the report computes where the crossover falls.
     recent.window_days as recent_window_days,
 
     -- No coalesce. The macro keeps every calibration customer, so a NULL here means a row went
