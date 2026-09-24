@@ -159,7 +159,9 @@ def monthly_occasions(result: ValidationResult, path: Path, settings: Settings) 
     axes.plot(
         calibration["month"],
         calibration["occasions"],
-        label="Calibration window (fitted)",
+        # Actual repeat purchases in the window the model was fitted on, not fitted values. The
+        # first label said "fitted", which the third audit pass read, correctly, as fitted values.
+        label="Calibration window (actual)",
         **ACTUAL_STYLE,
     )
     axes.plot(

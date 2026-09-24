@@ -9,9 +9,14 @@
 --
 -- Aggregate only, one row per (source, window_days). Per-customer scoring stays in
 -- int_customers__scored, for the configured window alone.
--- assert_recent_window_sensitivity_matches_the_scored_baseline ties the two together.
+-- assert_recent_window_sensitivity_matches_the_scored_baseline ties the two together, and
+-- assert_recent_window_sensitivity_recomputes checks every row independently.
+--
+-- 100 days sits just past the chosen window. The third audit pass found the rule already loses
+-- there, so the crossover lies between 91 and 100 days. Without that row the report could only
+-- say "somewhere before 122".
 
-{% set windows = [30, 61, 91, 122, 152, 182, 273] %}
+{% set windows = [30, 61, 91, 100, 122, 152, 182, 273] %}
 {% if var('recent_window_days') | int not in windows %}
     {% do windows.append(var('recent_window_days') | int) %}
 {% endif %}

@@ -382,7 +382,12 @@ def monthly_holdout(
         )
         for edge in edges[1:]
     ]
-    expected = pd.DataFrame({"month": edges[:-1], "expected": np.diff(cumulative)})
+    # Days in each month inside the window, so rates can be compared per day. October has 31 and
+    # June 30, and a raw first-to-last comparison mixes that into the trend.
+    offsets = [(edge - start).days for edge in edges]
+    expected = pd.DataFrame(
+        {"month": edges[:-1], "days": np.diff(offsets), "expected": np.diff(cumulative)}
+    )
 
     table = expected.merge(
         actual.assign(month=pd.to_datetime(actual["month"])), on="month", how="left"

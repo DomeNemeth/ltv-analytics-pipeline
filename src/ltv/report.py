@@ -163,10 +163,6 @@ def _sensitivity_sentence(result: ValidationResult, model_error: float) -> str:
         f"{int(row.window_days)} days {row.percent_error:+.1f}%" for row in table.itertuples()
     )
     beats = table["percent_error"].abs() < abs(model_error)
-    chosen = (
-        f" The {result.recent_window_days}-day window was chosen after an audit had reported "
-        f"30, 61 and 91 days, not blind; it is the least favourable of those three to the rule."
-    )
     if beats.all():
         verdict = "every window tested lands closer than the model."
     elif not beats.any():
@@ -175,13 +171,44 @@ def _sensitivity_sentence(result: ValidationResult, model_error: float) -> str:
         longest = int(table.loc[beats, "window_days"].max())
         shortest_losing = int(table.loc[~beats, "window_days"].min())
         verdict = (
-            f"**the rule beats the model only with a look-back of {longest} days or less.** From "
-            f"{shortest_losing} days on, the model's total is closer. The result is about the "
-            f"most recent months of behaviour, not about recent-rate rules in general."
+            f"**the rule beats the model only with a short look-back.** It wins at {longest} "
+            f"days and loses from {shortest_losing} days on, so the crossover lies between the "
+            f"two. The result is about the most recent months of behaviour, not about "
+            f"recent-rate rules in general."
         )
     else:
         verdict = "whether the rule beats the model depends on the window, with no clean cut-off."
-    return chosen + f" Across look-backs of {listed}, " + verdict
+    return _chosen_window_sentence(result) + f" Across look-backs of {listed}, " + verdict
+
+
+#: The look-back windows the first Phase 4 audit reported before the window was chosen. Recorded
+#: so the sentence about how the window was chosen stays true if the configured window changes.
+AUDITED_WINDOWS = (30, 61, 91)
+
+
+def _chosen_window_sentence(result: ValidationResult) -> str:
+    """How the configured window came to be chosen, true for whichever window is configured.
+
+    The first version was fixed text naming 91 days as the least favourable of three. That is true
+    of 91 today, but it would have printed unchanged, and falsely, for any other setting.
+    """
+    window = result.recent_window_days
+    if window not in AUDITED_WINDOWS:
+        return f" The {window}-day window is set in dbt_project.yml (recent_window_days)."
+    audited = result.recent_sensitivity[
+        result.recent_sensitivity["window_days"].isin(AUDITED_WINDOWS)
+    ]
+    least_favourable = int(audited.loc[audited["percent_error"].abs().idxmax(), "window_days"])
+    listed = ", ".join(str(w) for w in AUDITED_WINDOWS[:-1]) + f" and {AUDITED_WINDOWS[-1]}"
+    return (
+        f" The {window}-day window was chosen after an audit had reported {listed} days, so "
+        f"it was not a blind choice"
+        + (
+            "; it is the least favourable of those to the rule."
+            if least_favourable == window
+            else "."
+        )
+    )
 
 
 def _headline(result: ValidationResult) -> list[str]:
@@ -407,9 +434,11 @@ def _monthly_lines(result: ValidationResult) -> list[str]:
     if monthly.empty or len(monthly) < 2:
         return []
 
+    # Per day, not per month. October has 31 days and June 30, and the third audit pass pointed out
+    # that a raw month-to-month comparison mixes that difference into the trend.
     first, last = monthly.iloc[0], monthly.iloc[-1]
-    model_change = last["expected"] / first["expected"] - 1
-    actual_change = last["actual"] / first["actual"] - 1
+    model_change = (last["expected"] / last["days"]) / (first["expected"] / first["days"]) - 1
+    actual_change = (last["actual"] / last["days"]) / (first["actual"] / first["days"]) - 1
     shortfall = monthly["shortfall"].sum()
     worst = monthly.nsmallest(WORST_MONTHS, "shortfall")
     worst_share = worst["shortfall"].sum() / shortfall if shortfall else float("nan")
@@ -431,8 +460,8 @@ def _monthly_lines(result: ValidationResult) -> list[str]:
         "",
         _table(display, {"Actual": 0, "Expected": 0, "Expected − actual": 0}),
         "",
-        f"From the first holdout month to the last, the model's expectation changes by "
-        f"{model_change:+.1%} and the realised count by {actual_change:+.1%}. "
+        f"From the first holdout month to the last, per day, the model's expectation changes by "
+        f"{model_change:+.1%} and the realised rate by {actual_change:+.1%}. "
         + (
             "The model's decline is steeper than the cohort's, but that is not the whole story. "
             if model_change < actual_change

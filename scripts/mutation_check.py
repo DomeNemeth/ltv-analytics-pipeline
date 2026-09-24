@@ -363,6 +363,18 @@ MUTATIONS = (
         # could say anything, and its only test counted rows.
         guard="assert_recent_window_sensitivity_matches_the_scored_baseline",
     ),
+    Mutation(
+        name="sensitivity-other-windows-scaled",
+        path="dbt/models/intermediate/int_baselines__recent_window_sensitivity.sql",
+        old="        ) as predicted_purchases",
+        new=(
+            "        ) * case when recent.window_days = 91 then 1.0 else 0.8 end "
+            "as predicted_purchases"
+        ),
+        # The third audit pass: leaves the configured row alone, so the test above cannot see it,
+        # yet moves the crossover the headline reports. Only a per-row recomputation can.
+        guard="assert_recent_window_sensitivity_recomputes",
+    ),
 )
 
 #: Every check the harness can run, in the order a real user would.
