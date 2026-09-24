@@ -49,7 +49,9 @@ current_inputs as (
         sum(customer_rank * frequency) as weighted_frequency,
         sum(customer_rank * recency) as weighted_recency,
         sum(customer_rank * customer_age) as weighted_customer_age,
-        sum(customer_rank * cast(monetary_value as double)) as weighted_monetary_value
+        -- Integer ten-thousandths, exact on both sides. See CalibrationFingerprint.
+        sum(customer_rank * cast(round(monetary_value * 10000) as bigint))
+            as weighted_monetary_value_e4
 
     from ranked
     group by source
@@ -78,12 +80,14 @@ where recorded.source is null
     or recorded.sum_frequency != current_inputs.sum_frequency
     or recorded.sum_recency != current_inputs.sum_recency
     or recorded.sum_customer_age != current_inputs.sum_customer_age
-    -- Tolerance covers the difference between a float64 sum in pandas and a decimal sum in DuckDB
-    -- over 23,570 rows, which is around 1e-9. Any real change to spend is cents at minimum.
-    or abs(recorded.sum_monetary_value - current_inputs.sum_monetary_value) > 0.01
+    -- monetary_value is a mean stored to four decimals, so the smallest real change to it is
+    -- 0.0001: one cent of repeat spend spread over up to a hundred repeats. An earlier version
+    -- used a 0.01 tolerance here and on the weighted sum, which let one-cent changes through.
+    -- The plain sum is ~3e5, where float noise is around 1e-9, so 0.00005 separates noise from any
+    -- real change. The weighted sum is ~1e10, where float noise approaches the size of a real
+    -- change, so it is compared exactly in integer ten-thousandths instead.
+    or abs(recorded.sum_monetary_value - current_inputs.sum_monetary_value) > 0.00005
     or recorded.weighted_frequency != current_inputs.weighted_frequency
     or recorded.weighted_recency != current_inputs.weighted_recency
     or recorded.weighted_customer_age != current_inputs.weighted_customer_age
-    -- Rank weights reach 23,570, so float noise is larger here than in the plain sum, but still
-    -- around 1e-6. The smallest real change is one cent on the lowest-ranked customer: 0.01.
-    or abs(recorded.weighted_monetary_value - current_inputs.weighted_monetary_value) > 0.01
+    or recorded.weighted_monetary_value_e4 != current_inputs.weighted_monetary_value_e4

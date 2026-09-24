@@ -7,10 +7,25 @@
 -- copy of the warehouse. The holdout error went from -14.3% to 0%, and every post-fit guard stayed
 -- green, because nothing tied the predictions table to the fit that produced it.
 --
--- `ltv fit` records the sum of expected purchases, a rank-weighted sum of the same, and the sum of
--- expected forward revenue, all across every horizon. Scaling moves the sums. Reassigning
--- predictions between customers moves the weighted sum. A left join, so a source with predictions
--- but no fit_runs row fails too.
+-- The first version compared expected purchases and a plain revenue sum. The re-audit got three
+-- more edits past it: swapping the 273- and 365-day labels, moving revenue between customers, and
+-- overwriting expected_avg_value and probability_alive. So every column the report reads now gets
+-- three sums: plain, weighted by customer rank, and weighted by horizon. See PredictionFingerprint
+-- for what each one catches.
+--
+-- This column list must match FINGERPRINTED_PREDICTIONS in src/ltv/models/clv.py.
+-- tests/test_fingerprint.py fails if they differ.
+{% set columns = [
+    'expected_purchases',
+    'expected_forward_revenue',
+    'expected_avg_value',
+    'probability_alive',
+] %}
+{% set weightings = {
+    'sum': '1',
+    'weighted': 'customer_rank',
+    'horizon_weighted': 'horizon_days',
+} %}
 
 with predictions as (
 
@@ -27,9 +42,13 @@ written as (
 
     select
         source,
-        sum(expected_purchases) as sum_expected_purchases,
-        sum(customer_rank * expected_purchases) as weighted_expected_purchases,
-        sum(expected_forward_revenue) as sum_expected_forward_revenue
+        {%- for column in columns %}
+        {%- for prefix, weight in weightings.items() %}
+        sum({{ weight }} * cast({{ column }} as double)) as {{ prefix }}_{{ column }}
+        {%- if not loop.last %},{% endif %}
+        {%- endfor %}
+        {%- if not loop.last %},{% endif %}
+        {%- endfor %}
     from predictions
     group by source
 
@@ -41,24 +60,24 @@ recorded as (
 
 )
 
-select
-    written.source,
-    recorded.sum_expected_purchases as recorded_purchases,
-    written.sum_expected_purchases as table_purchases,
-    recorded.sum_expected_forward_revenue as recorded_revenue,
-    written.sum_expected_forward_revenue as table_revenue
+select written.source
 
 from written
 
 left join recorded
     on written.source = recorded.source
 
--- Relative tolerance for floating-point summation order, which differs between pandas and DuckDB.
--- The smallest edit worth catching moves a sum by far more than one part in a billion.
+-- A left join, so a source with predictions but no fit_runs row fails too. Relative tolerance for
+-- floating-point summation order, which differs between pandas and DuckDB. The smallest edit worth
+-- catching moves a sum by far more than one part in a billion. coalesce(..., true), so a NULL on
+-- either side counts as a mismatch rather than as "no difference".
 where recorded.source is null
-    or abs(recorded.sum_expected_purchases - written.sum_expected_purchases)
-        > 1e-9 * abs(recorded.sum_expected_purchases)
-    or abs(recorded.weighted_expected_purchases - written.weighted_expected_purchases)
-        > 1e-9 * abs(recorded.weighted_expected_purchases)
-    or abs(recorded.sum_expected_forward_revenue - written.sum_expected_forward_revenue)
-        > 1e-9 * abs(recorded.sum_expected_forward_revenue)
+{%- for column in columns %}
+{%- for prefix in weightings %}
+    or coalesce(
+        abs(recorded.{{ prefix }}_{{ column }} - written.{{ prefix }}_{{ column }})
+            > 1e-9 * abs(recorded.{{ prefix }}_{{ column }}),
+        true
+    )
+{%- endfor %}
+{%- endfor %}

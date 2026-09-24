@@ -87,7 +87,20 @@ class CalibrationFingerprint:
     weighted_frequency: int
     weighted_recency: int
     weighted_customer_age: int
-    weighted_monetary_value: float
+    #: In integer ten-thousandths, the precision monetary_value is stored at. Exact, so it is
+    #: compared with no tolerance. As a float, this ~1e10 sum carries rounding noise near the
+    #: size of the smallest real change (0.0001 on one customer), and no tolerance separates them.
+    weighted_monetary_value_e4: int
+
+
+#: Every prediction column the report or the dashboard reads a number from. A column missing here
+#: can be edited after the fit without any guard noticing.
+FINGERPRINTED_PREDICTIONS = (
+    "expected_purchases",
+    "expected_forward_revenue",
+    "expected_avg_value",
+    "probability_alive",
+)
 
 
 @dataclass(frozen=True)
@@ -96,23 +109,36 @@ class PredictionFingerprint:
 
     The calibration fingerprint says the *inputs* have not moved since the fit. It says nothing
     about the output. The Phase 4 audit multiplied every prediction by 1.167 on a copy of the
-    warehouse and got a 0% holdout error, with every post-fit guard green. Summed across all
-    horizons, and rank-weighted in the same way as the calibration sums, so both scaling and
-    reassignment between customers change a recorded number.
+    warehouse and got a 0% holdout error, with every post-fit guard green.
+
+    Three sums per column, because the re-audit found three kinds of edit a single sum misses:
+
+    * ``sum_`` sees scaling and constant overwrites, such as probability_alive set to 1.
+    * ``weighted_`` weights each row by its customer's rank in ``customer_id`` order, so moving
+      values between customers moves it. Dense rank, because each customer has one row per
+      horizon.
+    * ``horizon_weighted_`` weights each row by its ``horizon_days``. Swapping the 273- and
+      365-day labels leaves every other sum untouched, and it made the model look 8.8% high
+      instead of 14.3% low.
+
+    Held as a dict keyed by the ``fit_runs`` column name. The dbt test that reads them keeps its own
+    copy of the column list, because dbt cannot import Python, and tests/test_fingerprint.py fails
+    if the two lists differ.
     """
 
-    sum_expected_purchases: float
-    weighted_expected_purchases: float
-    sum_expected_forward_revenue: float
+    values: dict[str, float]
 
     @classmethod
     def of(cls, predictions: pd.DataFrame) -> PredictionFingerprint:
         rank = predictions["customer_id"].rank(method="dense")
-        return cls(
-            sum_expected_purchases=float(predictions["expected_purchases"].sum()),
-            weighted_expected_purchases=float((rank * predictions["expected_purchases"]).sum()),
-            sum_expected_forward_revenue=float(predictions["expected_forward_revenue"].sum()),
-        )
+        horizon = predictions["horizon_days"].astype(float)
+        values = {}
+        for column in FINGERPRINTED_PREDICTIONS:
+            value = predictions[column].astype(float)
+            values[f"sum_{column}"] = float(value.sum())
+            values[f"weighted_{column}"] = float((rank * value).sum())
+            values[f"horizon_weighted_{column}"] = float((horizon * value).sum())
+        return cls(values=values)
 
 
 @dataclass(frozen=True)
@@ -138,7 +164,12 @@ class CalibrationData:
             weighted_frequency=int((rank * customers["frequency"]).sum()),
             weighted_recency=int((rank * customers["recency"]).sum()),
             weighted_customer_age=int((rank * customers["customer_age"]).sum()),
-            weighted_monetary_value=float((rank * customers["monetary_value"].astype(float)).sum()),
+            weighted_monetary_value_e4=int(
+                (
+                    rank
+                    * (customers["monetary_value"].astype(float) * 10_000).round().astype("int64")
+                ).sum()
+            ),
         )
 
     @property

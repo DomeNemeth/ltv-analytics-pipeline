@@ -173,10 +173,8 @@ def write_fit_run(
             "weighted_frequency": [fingerprint.weighted_frequency],
             "weighted_recency": [fingerprint.weighted_recency],
             "weighted_customer_age": [fingerprint.weighted_customer_age],
-            "weighted_monetary_value": [fingerprint.weighted_monetary_value],
-            "sum_expected_purchases": [predictions.sum_expected_purchases],
-            "weighted_expected_purchases": [predictions.weighted_expected_purchases],
-            "sum_expected_forward_revenue": [predictions.sum_expected_forward_revenue],
+            "weighted_monetary_value_e4": [fingerprint.weighted_monetary_value_e4],
+            **{name: [value] for name, value in predictions.values.items()},
         }
     )
 
