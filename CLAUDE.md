@@ -314,9 +314,13 @@ one additional customer, not 68.
   1997-01-01 and 1997-03-25, so no holdout occasion is anyone's first purchase and BG/NBD's repeat
   count is the right comparand. The horizon lines up to the day.
 - **It is real misspecification: the process is not stationary.** Monthly repeat occasions fall ~40%
-  through calibration (3,690 → 2,220) and then *plateau* at ~2,200 through the holdout rather than
-  continuing down. BG/NBD can only explain the calibration decline as dropout plus heterogeneity
-  sorting, so it extrapolates a decay the real cohort stops doing. In-sample fit is excellent
+  through calibration (3,690 → 2,220). They keep falling through the holdout, but more slowly than
+  the model expects: across the holdout's calendar months the model's expectation falls 30.8%
+  against a realised 18.4%. The shortfall is also bunched: Nov 1997, Mar 1998 and Jun 1998 hold 63%
+  of it. (An earlier version of this bullet said the holdout "plateaus at ~2,200 rather than
+  continuing down". The Phase 4 re-audit measured it, and it does not plateau.) BG/NBD can only
+  explain the calibration decline as dropout plus heterogeneity sorting, and none of the models has
+  a seasonal term. In-sample fit is excellent
   (+0.8% on calibration repeat transactions); the error is entirely out-of-sample and grows with
   horizon (ratio 0.945 at 30 days → 0.857 at 273).
 - **The shortfall is concentrated:** customers with exactly 1 or 2 calibration repeats account for
@@ -332,15 +336,24 @@ outcome is a stronger README line than a bare error number.
   `reports/validation_cdnow.md`, three charts, and **112 rows** to `model.validation_metrics`.
   That count is with `--compare-models`, which is what CI runs and what the committed report
   reflects; a plain run writes fewer. It builds the post-fit dbt models itself immediately before
-  reading them. The guards there fail the build if the calibration inputs have moved since the
-  fit, or if the predictions table no longer holds what the fit wrote. That is what the guards
-  can see; it is not a proof that nothing else can go stale.
+  reading them. The guards there fail the build if the calibration features have moved since the
+  fit (plain and rank-weighted sums), or if any of expected purchases, expected revenue, expected
+  order value or probability alive differs from what the fit recorded writing (plain, rank- and
+  horizon-weighted sums). Those comparisons are what the guards cover. Sums can in principle be
+  matched by a coincidental edit, and columns outside that list are not covered at all.
 - **The model does not beat the best naive rule on the aggregate total.** It predicts 16,867
   purchases against 19,684 actual (**−14.3%**). Predicting that each customer repeats at the rate
-  of their last 91 days of calibration gives **21,585 (+9.7%)**. At 30 and 61 days that rule gives
-  +2.6% and +1.2%, so the window choice does not carry the conclusion. The window was fixed at one
-  quarter before looking at which one flatters the rule. The Phase 4 audit found this rule; it
-  was not in the first version of the report.
+  of their last 91 days of calibration gives **21,585 (+9.7%)**. The Phase 4 audit found this rule;
+  it was not in the first version of the report.
+
+  **The result depends on the look-back window, and only short windows win.** At 30, 61, 91, 122,
+  152, 182 and 273 days the rule lands at +2.6%, +1.2%, +9.7%, +16.5%, +18.5%, +26.6% and
+  +47.4%, so it beats the model only with a look-back of 91 days or less. The report computes that
+  crossover from `int_baselines__recent_window_sensitivity`. The 91-day window was chosen
+  *after* the audit had reported 30, 61 and 91 days, and is the least favourable of those three to
+  the rule. An earlier version of this bullet said it was "fixed before looking at results" and
+  that "the window choice does not carry the conclusion". The re-audit found both false, and both
+  have been withdrawn.
 
   It works for the same reason the model misses: the purchase rate falls through calibration, and
   a rule that looks only at the end of the window picks up the lower rate. Rules that average the
@@ -355,9 +368,11 @@ outcome is a stronger README line than a bare error number.
   buys anything scores 0.835**, because 16,512 of 23,570 customers genuinely buy nothing. On a
   quantity that is 70% zeros the all-zero rule *is* the MAE floor, and the model clears it by
   **2.0%**. Every naive rule that predicts purchases is worse than doing nothing. The model's
-  advantage is therefore narrow: modestly better per customer, and an estimate for every
-  customer. It is not better on the total and not better at ranking, and any README line implying
-  otherwise is unsupported.
+  advantage is therefore narrow. It is modestly better per customer. It also gives the 14,119
+  customers with no repeat history an individual, non-zero estimate (0.230 purchases each
+  against 0.251 actual), where every naive rule gives them zero or one shared figure. It is not
+  better on the total and not better at ranking, and any README line implying otherwise is
+  unsupported.
 - **Fitting is not predicting, quantified.** In-sample the model expects 24,533 calibration repeat
   transactions against 24,337 actual (**+0.8%**); out-of-sample it is **−14.3%**. Both are printed
   in the report, adjacent and labelled, because the in-sample figure is the one that would otherwise
@@ -531,14 +546,19 @@ Note it compares **content, not timestamps**. Re-running `ltv transform` after a
 same numbers and the guard stays quiet, which is the point — a timestamp-based check would cry wolf
 on every rebuild and get ignored within a week.
 
-**The Phase 4 audit showed plain sums were not enough, in two ways, both proven on a copy of the
+**The Phase 4 audits showed plain sums were not enough, proven each time on a copy of the
 warehouse.** Rotating every customer's features by one row changed frequency for 13,943 customers
 and left every sum unchanged. Scaling the predictions by 1.167 after the fit gave a 0% holdout
 error with every guard green, because nothing tied the predictions table to the fit at all. The
 guard now also compares feature sums weighted by each customer's rank in `customer_id` order, which
 move when a value changes owner. A second test, `assert_predictions_are_the_ones_the_fit_wrote`,
-compares prediction totals, plain and rank-weighted, against what the fit recorded writing. Both
-are mutation-verified.
+compares prediction totals, plain and rank-weighted, against what the fit recorded writing. The
+re-audit then got three more edits past that first version: swapping the 273- and 365-day labels
+(which made the model look 8.8% high), moving revenue between customers, and overwriting
+`expected_avg_value` and `probability_alive`. All four prediction columns now carry plain, rank-
+and horizon-weighted sums. The rank-weighted `monetary_value` sum is compared in exact integer
+ten-thousandths, because as a float its rounding noise approached the smallest real change. Every
+one of these is mutation-verified.
 
 **A second instance of "restoring source is not restoring state", found by looking at a chart.**
 `reports/` is tracked, and `ltv validate` writes into it. A mutation-testing run therefore leaves
@@ -593,12 +613,14 @@ than no test, because it buys false confidence.
 
 `scripts/mutation_check.py` is now the harness for this, added in Phase 2 once it was clear the need
 was recurring. It applies one deliberate defect at a time, runs `ltv transform` and `pytest`,
-restores the file, and reports which guard noticed. **26 mutations, 26 caught** as of 2026-09-24:
-the five added after the Phase 4 audit cover the recent-rate baseline's leakage and population, a
-NULL baseline, predictions edited after the fit, and the rank-weighted staleness sums. Add a mutation
-whenever a test claims to protect something load-bearing. Six of the twenty-one break Python rather
-than SQL: the dbt suite is blind to all of them, because every one produces a model that fits,
-converges, and reports plausible numbers.
+restores the file, and reports which guard noticed. **30 mutations, 30 caught** as of 2026-09-24.
+The five added after the Phase 4 audit cover the recent-rate baseline's leakage and population, a
+NULL baseline, predictions edited after the fit, and the rank-weighted staleness sums. The four
+added after the re-audit cover swapped horizon labels, revenue moved between customers, an
+overwritten probability_alive, and scaled window-sensitivity totals. Add a mutation
+whenever a test claims to protect something load-bearing. Many break Python rather than SQL, and
+the dbt suite on its own is blind to those, because each produces a model that fits, converges, and
+reports plausible numbers.
 
 Since Phase 4 the harness runs `ltv validate` as well as `ltv transform` and `pytest`, because
 `ltv transform` excludes `tag:post_fit` and would therefore be blind to every mutation in the
