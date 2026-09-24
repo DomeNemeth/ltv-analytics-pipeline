@@ -182,14 +182,14 @@ These exist because getting them wrong produces a model that looks excellent and
 ## 7. Definition of done
 
 - [ ] One command from clean clone to populated warehouse and built dashboard
-- [ ] Model output validated on a calibration/holdout split with reported error metrics —
-      `ltv validate` scores against five naive baselines and two challenger models, but
-      **`clv-validator` has not signed off**. An earlier version of this line claimed a sign-off
-      on re-audit. None could be confirmed, so the audit was re-run on 2026-09-23, and it withheld
-      sign-off. Every number recomputed; four conclusions did not (§8). The fixes have landed and
-      a re-audit is owed. Two conditions carry over to any future sign-off: no `--full-bayes`
-      interval number reaches the README without its one-off label, and nothing may present those
-      HDIs as a range a customer's revenue will land in.
+- [x] Model output validated on a calibration/holdout split with reported error metrics —
+      `ltv validate` scores against five naive baselines and two challenger models, and
+      **`clv-validator` signed off on 2026-09-24, at `7fe2e6f`, on its third pass.** An earlier
+      version of this line claimed a sign-off that could not be confirmed. The audit was re-run
+      and withheld sign-off twice first: once over four conclusions the numbers did not support,
+      then over two sentences written while fixing them (§8). Two conditions travel with the
+      sign-off: no `--full-bayes` interval number reaches the README without its one-off label,
+      and nothing may present those HDIs as a range a customer's revenue will land in.
 - [x] Data quality tests that would actually catch a bad load — not asserted, demonstrated: every
       guard in the suite has a deliberate defect in `scripts/mutation_check.py` that it is confirmed
       to catch.
@@ -315,8 +315,8 @@ one additional customer, not 68.
   count is the right comparand. The horizon lines up to the day.
 - **It is real misspecification: the process is not stationary.** Monthly repeat occasions fall ~40%
   through calibration (3,690 → 2,220). They keep falling through the holdout, but more slowly than
-  the model expects: across the holdout's calendar months the model's expectation falls 30.8%
-  against a realised 18.4%. The shortfall is also bunched: Nov 1997, Mar 1998 and Jun 1998 hold 63%
+  the model expects: per day, from the first holdout month to the last, the model's expectation
+  falls 28.5% against a realised 15.7%. The shortfall is also bunched: Nov 1997, Mar 1998 and Jun 1998 hold 63%
   of it. (An earlier version of this bullet said the holdout "plateaus at ~2,200 rather than
   continuing down". The Phase 4 re-audit measured it, and it does not plateau.) BG/NBD can only
   explain the calibration decline as dropout plus heterogeneity sorting, and none of the models has
@@ -346,10 +346,12 @@ outcome is a stronger README line than a bare error number.
   of their last 91 days of calibration gives **21,585 (+9.7%)**. The Phase 4 audit found this rule;
   it was not in the first version of the report.
 
-  **The result depends on the look-back window, and only short windows win.** At 30, 61, 91, 122,
-  152, 182 and 273 days the rule lands at +2.6%, +1.2%, +9.7%, +16.5%, +18.5%, +26.6% and
-  +47.4%, so it beats the model only with a look-back of 91 days or less. The report computes that
-  crossover from `int_baselines__recent_window_sensitivity`. The 91-day window was chosen
+  **The result depends on the look-back window, and only short windows win.** At 30, 61, 91, 100,
+  122, 152, 182 and 273 days the rule lands at +2.6%, +1.2%, +9.7%, +15.1%, +16.5%, +18.5%,
+  +26.6% and +47.4%. It wins at 91 days and loses from 100, so the crossover lies between the two,
+  and the chosen window sits within about nine days of it. The report computes that crossover
+  from `int_baselines__recent_window_sensitivity`, and every row of it is recomputed
+  independently by `assert_recent_window_sensitivity_recomputes`. The 91-day window was chosen
   *after* the audit had reported 30, 61 and 91 days, and is the least favourable of those three to
   the rule. An earlier version of this bullet said it was "fixed before looking at results" and
   that "the window choice does not carry the conclusion". The re-audit found both false, and both
@@ -600,8 +602,13 @@ or already-in-context work; do it inline and say the subagent was skipped and wh
   Ran the Phase 4 metrics audit on 2026-09-23 and **withheld sign-off again**. Every headline
   number recomputed independently, and four conclusions did not survive: Pareto/NBD's win was
   cancelling errors, a naive recent-rate rule beats the model on the total, the report's headline
-  contradicted its own body, and full-Bayes figures were fixed text. The fixes have landed. It is
-  owed a re-audit, and must sign off before any accuracy claim reaches the README.
+  contradicted its own body, and full-Bayes figures were fixed text. The re-audit withheld again
+  over two sentences written during the fixes. It **signed off on the third pass** (2026-09-24,
+  `7fe2e6f`). Two advisories from that pass are documented rather than fixed. Any sum-based
+  fingerprint can be matched by an edit shaped to cancel out; a per-row hash would close that.
+  And June's shortfall reads more like steady decay than seasonality, which the report's hedge
+  covers. **Pattern worth remembering:** every round of fixes introduced something the next audit
+  caught, including false honesty caveats. Budget an audit after every round, not just the first.
 - `repo-reviewer` — pre-commit diff review against portfolio standards.
 
 **Ask reviewers to verify by mutation, not by reading.** The Phase 1 review found three tests that
@@ -613,11 +620,13 @@ than no test, because it buys false confidence.
 
 `scripts/mutation_check.py` is now the harness for this, added in Phase 2 once it was clear the need
 was recurring. It applies one deliberate defect at a time, runs `ltv transform` and `pytest`,
-restores the file, and reports which guard noticed. **30 mutations, 30 caught** as of 2026-09-24.
+restores the file, and reports which guard noticed. **31 mutations, 31 caught** as of 2026-09-24.
 The five added after the Phase 4 audit cover the recent-rate baseline's leakage and population, a
 NULL baseline, predictions edited after the fit, and the rank-weighted staleness sums. The four
 added after the re-audit cover swapped horizon labels, revenue moved between customers, an
-overwritten probability_alive, and scaled window-sensitivity totals. Add a mutation
+overwritten probability_alive, and window-sensitivity totals scaled all together. The third audit
+pass then showed that scaling only the rows *other than* the configured window got past every
+guard. That became mutation 31, caught only by the per-row recomputation added for it. Add a mutation
 whenever a test claims to protect something load-bearing. Many break Python rather than SQL, and
 the dbt suite on its own is blind to those, because each produces a model that fits, converges, and
 reports plausible numbers.
