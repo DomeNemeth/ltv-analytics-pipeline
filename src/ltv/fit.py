@@ -13,12 +13,13 @@ from pathlib import Path
 from ltv.config import Settings, get_settings
 from ltv.models.clv import (
     CalibrationData,
+    PredictionFingerprint,
     check_assumptions,
     fit_models,
     load_calibration,
     predict,
 )
-from ltv.models.store import save_fit, write_predictions
+from ltv.models.store import save_fit, write_fit_run, write_predictions
 
 
 @dataclass(frozen=True)
@@ -77,6 +78,18 @@ def run_fit(
     predictions = predict(models, data, horizons)
 
     rows_written = write_predictions(predictions, settings)
+
+    # Written after the predictions, never before: a fit_runs row asserts that the predictions table
+    # corresponds to these inputs, and it must not make that claim about a write that failed.
+    write_fit_run(
+        source,
+        method=models.method,
+        horizons=horizons,
+        holdout_days=data.holdout_days,
+        fingerprint=data.fingerprint,
+        predictions=PredictionFingerprint.of(predictions),
+        settings=settings,
+    )
 
     return FitResult(
         source=source,

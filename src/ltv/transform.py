@@ -31,6 +31,48 @@ from ltv.warehouse import connect
 #: shipped looking green.
 DEFAULT_ARGS: tuple[str, ...] = ("build",)
 
+#: Models and tests that read ``model.customer_predictions``, which does not exist until ``ltv fit``
+#: has run. They are tagged rather than kept in a separate project so that lineage stays in one DAG.
+POST_FIT_TAG = "post_fit"
+
+#: The post-fit half of the DAG, built by ``ltv validate`` immediately before it reads the result.
+#: Named here rather than spelled out in :mod:`ltv.validate` so the two halves of the build cannot
+#: come to disagree about which tag they mean.
+POST_FIT_ARGS: tuple[str, ...] = ("build", "--select", f"tag:{POST_FIT_TAG}")
+
+#: dbt commands that take node selection. ``docs generate`` and ``debug`` do not, and appending a
+#: selection flag to them is an error rather than a no-op.
+SELECTING_COMMANDS = frozenset(
+    {"build", "run", "test", "seed", "snapshot", "compile", "list", "ls"}
+)
+
+#: If any of these is present the caller has said what they want, and this module must not
+#: second-guess it.
+SELECTION_FLAGS = frozenset({"--select", "-s", "--exclude", "--selector", "--models", "-m"})
+
+
+def _excluding_post_fit(requested: list[str]) -> list[str]:
+    """Leave the post-fit models out of a build that did not ask for anything in particular.
+
+    "Build the project" has to mean "build everything that can be built right now", and on a clean
+    clone -- or in CI, or at the first step of the Phase 6 flow -- the predictions table does not
+    exist yet. Without this, the first command the README tells a reader to run fails on a missing
+    relation, naming a model rather than the step they have not reached.
+
+    Applied here rather than folded into :data:`DEFAULT_ARGS` because the exclusion has to hold for
+    ``run_dbt(["build"])`` as well as for ``run_dbt(None)``. Making it a property of the default
+    argument list alone left an explicit ``build`` running the whole DAG, which is the same command
+    meaning two different things depending on how it was spelled -- and the test suite caught it.
+
+    Any explicit selection wins, so ``ltv transform --select tag:post_fit`` and
+    ``ltv transform build --exclude staging`` both do exactly what they say.
+    """
+    if not requested or requested[0] not in SELECTING_COMMANDS:
+        return requested
+    if SELECTION_FLAGS & set(requested):
+        return requested
+    return [*requested, "--exclude", f"tag:{POST_FIT_TAG}"]
+
 
 class TransformError(RuntimeError):
     """Raised when dbt fails, or when the warehouse is not in a state dbt can run against."""
@@ -132,6 +174,7 @@ def run_dbt(args: Sequence[str] | None = None, settings: Settings | None = None)
     requested = list(args or ())
     if not requested or requested[0].startswith("-"):
         requested = [*DEFAULT_ARGS, *requested]
+    requested = _excluding_post_fit(requested)
 
     project_dir = str(settings.dbt_dir)
     invocation = [

@@ -148,6 +148,157 @@ models:
         description: Length of the holdout window in days, carried through for rate-based scoring.
         data_tests: [not_null]
 
+  # As with the staging model it reads, every test here is tagged `post_fit` explicitly so that the
+  # default `ltv transform` excludes it along with the model. Nothing in this block can run before
+  # `ltv fit` has written the predictions table.
+  - name: int_customers__scored
+    description: >
+      One row per calibration customer: the model's prediction, the customer's actual holdout
+      behaviour, the naive baselines, and the calibration features they are all conditioned on.
+      What `ltv validate` computes its metrics from, and what the Phase 5 marts read.
+    columns:
+      - name: customer_id
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: source
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: horizon_days
+        description: >
+          Always equal to duration_holdout -- the predictions join selects the horizon that matches
+          the scoring window rather than a literal. Pinned by
+          assert_scored_horizon_matches_the_holdout_window.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: holdout_frequency
+        description: >
+          Ground truth: every occasion in the holdout window. Not coalesced to zero here -- the model
+          it comes from already emits a real zero for customers who did not return, so a NULL at this
+          point means a row went missing in the join, which is a different problem and must fail.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: expected_purchases
+        description: >
+          The model's forecast over duration_holdout days. NULL would mean this customer has no
+          prediction at the scoring horizon, i.e. the fit and the window have come apart.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_purchases
+        description: >
+          Naive rule: the customer keeps repeating at their calibration rate, scaled to the holdout
+          length. Calibration inputs only -- see assert_baselines_use_only_calibration_inputs.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_purchases_flat
+        description: >
+          Naive rule with no customer-level information at all: the population repeat rate scaled to
+          the holdout length. The floor a model must clear to have learned anything.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_avg_value
+        description: >
+          Past average repeat order value, with the population mean for those who have none.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_revenue_flat
+        description: >
+          Population repeat rate times population mean order value. Reported in the reference table,
+          so it is guarded -- it spent one commit being quoted with no test at all, which is the
+          shape of the Phase 2 finding about unguarded holdout money.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_carry_forward
+        description: >
+          Naive rule with no rescaling: you repeat as often next window as you did last window.
+          Biased low on exposure: customers averaged 229 days of calibration on CDNOW against a
+          273-day holdout. It lands nearer the actual total than the rate rules only because that
+          bias partly cancels the fall in the purchase rate.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: expected_avg_value
+        description: >
+          The spend model's expected order value. The population mean for customers Gamma-Gamma
+          could not fit, flagged by spend_estimate_source, never NULL.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: expected_forward_revenue
+        description: >
+          Expected purchases times expected order value over duration_holdout days.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_revenue
+        description: >
+          baseline_purchases times baseline_avg_value. Reported, so guarded: a NULL here would
+          drop the customer from the revenue metrics without anything failing.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_revenue_carry_forward
+        description: >
+          baseline_carry_forward times baseline_avg_value.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: recent_window_days
+        description: >
+          Look-back length behind baseline_recent, from var recent_window_days. Carried on the row
+          so the report reads the window it describes rather than restating it.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_recent
+        description: >
+          Naive rule: the customer keeps repeating at the rate of their last recent_window_days of
+          calibration, scaled to the holdout length. Exploits the fall in the purchase rate that
+          the whole-window rules average over. Calibration occasions only, via
+          macros/recent_repeats.sql.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_revenue_recent
+        description: >
+          baseline_recent times baseline_avg_value.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+      - name: baseline_zero
+        description: >
+          Predict that nobody buys anything. The floor per-customer MAE is really measured against
+          on a quantity where 70% of actuals are zero.
+        data_tests:
+          - not_null:
+              config: {tags: [post_fit]}
+
+  - name: int_baselines__recent_window_sensitivity
+    description: >
+      The recent-run-rate baseline's predicted holdout total at look-back windows from 30 to 273
+      days, plus the configured window if it is none of those. Shows how far the rule's result
+      depends on the window; the report computes where it stops beating the model. One row per
+      (source, window_days) over the whole population, asserted by
+      assert_recent_window_sensitivity_is_complete. The configured window's row is tied to the
+      scored baseline by assert_recent_window_sensitivity_matches_the_scored_baseline.
+    columns:
+      - name: source
+        data_tests: [not_null]
+      - name: window_days
+        data_tests: [not_null]
+      - name: predicted_purchases
+        data_tests: [not_null]
+      - name: actual_purchases
+        data_tests: [not_null]
+
   - name: int_cohorts__monthly_retention
     description: >
       Acquisition-cohort retention by month. Three cohorts on CDNOW, which is a property of the

@@ -14,6 +14,9 @@ dependencies = [
     "dbt-duckdb>=1.9",
     # probabilistic CLV modelling
     "pymc-marketing>=0.10",
+    # Declared explicitly rather than leaned on transitively through PyMC: the validation metrics
+    # import scipy.stats directly, and an undeclared import is a dependency waiting to disappear.
+    "scipy>=1.14",
     # PyTensor backends that need no C compiler (see CLAUDE.md section 4)
     "numba>=0.60",
     "nutpie>=0.13",

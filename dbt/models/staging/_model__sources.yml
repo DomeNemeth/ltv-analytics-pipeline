@@ -1,0 +1,30 @@
+version: 2
+
+sources:
+  - name: model
+    schema: model
+    description: >
+      Relations written by Python rather than by dbt: the fitted models' per-customer predictions and
+      the provenance of the fit that produced them. Kept in their own schema so the warehouse itself
+      shows which stage wrote what, and read back in here so that scoring predictions against
+      holdout actuals is a tested dbt model rather than an untested join in a notebook.
+
+      Nothing in this schema exists until `ltv fit` has run, which is why every model reading it is
+      tagged `post_fit` and excluded from the default `ltv transform` build. A clean clone therefore
+      transforms successfully with no fit present, and `ltv validate` builds these afterwards.
+
+      Deliberately no `freshness:` block. dbt parses a source definition against a missing relation
+      without complaint, which is what makes the clean-clone path work; a freshness block would go
+      looking for the table at parse time and take that away.
+    tables:
+      - name: customer_predictions
+        description: >
+          One row per customer per horizon, written by `ltv fit`. `horizon_days` is a column rather
+          than encoded in column names, so a revenue number cannot be read without the window it
+          applies to.
+      - name: fit_runs
+        description: >
+          One row per source recording what the last fit trained on: method, horizons, and summary
+          statistics of the exact calibration frame it consumed. Read by
+          assert_predictions_match_the_current_calibration_inputs to prove the predictions still
+          correspond to the warehouse they were fitted from.

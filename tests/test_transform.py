@@ -13,7 +13,13 @@ import pytest
 import yaml  # dbt depends on PyYAML, so it is always present alongside this project's dbt runner.
 
 from ltv.config import Settings, get_settings
-from ltv.transform import TransformError, _dbt_environment, run_dbt
+from ltv.transform import (
+    POST_FIT_ARGS,
+    POST_FIT_TAG,
+    TransformError,
+    _dbt_environment,
+    run_dbt,
+)
 from ltv.warehouse import connect
 
 
@@ -107,6 +113,47 @@ def test_a_leading_flag_applies_to_the_default_command(recorded: Settings) -> No
     assert _RecordingRunner.invocations[0][:3] == ["build", "--select", "staging"]
 
 
+def test_an_unselective_build_leaves_out_the_post_fit_models(recorded: Settings) -> None:
+    """`ltv transform` on a clean clone must not try to build models that read the fit's output.
+
+    int_customers__scored reads model.customer_predictions, which does not exist until `ltv fit`
+    has run. Without the exclusion, the first command the README tells a reader to run fails on a
+    missing relation and names a dbt model rather than the step they have not reached yet.
+    """
+    run_dbt(None, recorded)
+
+    assert _RecordingRunner.invocations[0][:3] == ["build", "--exclude", f"tag:{POST_FIT_TAG}"]
+
+
+def test_an_explicitly_named_build_is_excluded_the_same_way(recorded: Settings) -> None:
+    """`run_dbt(["build"])` and `run_dbt(None)` must mean the same thing.
+
+    They did not, briefly: the exclusion lived in DEFAULT_ARGS, which is only applied when the
+    caller passes nothing or passes a leading flag. An explicit `build` therefore ran the whole DAG
+    including the post-fit models, so every integration fixture failed on a warehouse with no fit.
+    The behaviour is pinned here rather than left to the default-argument path.
+    """
+    run_dbt(["build"], recorded)
+
+    assert _RecordingRunner.invocations[0][:3] == ["build", "--exclude", f"tag:{POST_FIT_TAG}"]
+
+
+def test_an_explicit_selection_is_never_second_guessed(recorded: Settings) -> None:
+    """`ltv validate` selects the post-fit models by tag; nothing may add an exclusion over it."""
+    run_dbt(list(POST_FIT_ARGS), recorded)
+
+    invocation = _RecordingRunner.invocations[0]
+    assert invocation[:3] == ["build", "--select", f"tag:{POST_FIT_TAG}"]
+    assert "--exclude" not in invocation
+
+
+def test_a_command_that_takes_no_selection_is_left_alone(recorded: Settings) -> None:
+    """dbt rejects --exclude on `docs generate`, so appending it would break the command."""
+    run_dbt(["docs", "generate"], recorded)
+
+    assert "--exclude" not in _RecordingRunner.invocations[0]
+
+
 def test_a_leading_word_selects_a_different_command(recorded: Settings) -> None:
     run_dbt(["test", "--select", "staging"], recorded)
 
@@ -142,7 +189,9 @@ def test_reports_a_dbt_failure_rather_than_returning_quietly(recorded: Settings)
     original = dbt.cli.main.dbtRunner
     dbt.cli.main.dbtRunner = _FailingRunner
     try:
-        with pytest.raises(TransformError, match="dbt build failed"):
+        # The message names the invocation as dbt received it, exclusion and all, so a reader
+        # can paste it back and reproduce the failure.
+        with pytest.raises(TransformError, match=r"dbt build --exclude tag:post_fit failed"):
             run_dbt(["build"], recorded)
     finally:
         dbt.cli.main.dbtRunner = original

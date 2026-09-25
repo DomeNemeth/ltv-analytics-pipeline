@@ -58,12 +58,119 @@ class ModelError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CalibrationFingerprint:
+    """A summary of the exact numbers a fit trained on, small enough to store beside its output.
+
+    This exists because restoring source is not restoring state. A mutation-testing run once left
+    ``int_customers__rfm_calibration`` materialised from mutated SQL while every file on disk was
+    clean, and the next fit trained on it happily. Nothing in the repo could see the difference,
+    because every check inspected source rather than the warehouse.
+
+    Recorded at fit time and re-derived from the warehouse afterwards, it turns "the predictions no
+    longer correspond to the data" from an invisible condition into a failing test. Sums rather than
+    a hash so that a mismatch says *which* quantity moved, and so the dbt-side recomputation is
+    ordinary readable SQL rather than an exercise in matching a serialisation byte for byte.
+
+    Plain sums miss one failure: the right values attached to the wrong customers. The Phase 4
+    audit shifted every customer's features by one row on a copy of the warehouse. That changed
+    frequency for 13,943 customers and left every sum untouched. The ``weighted_*`` sums weight
+    each customer by their rank in ``customer_id`` order, so moving a value to a different
+    customer moves the total. Rank rather than the id itself because ids need not be numeric,
+    and both sides can rank identically.
+    """
+
+    rows: int
+    sum_frequency: int
+    sum_recency: int
+    sum_customer_age: int
+    sum_monetary_value: float
+    weighted_frequency: int
+    weighted_recency: int
+    weighted_customer_age: int
+    #: In integer ten-thousandths, the precision monetary_value is stored at. Exact, so it is
+    #: compared with no tolerance. As a float, this ~1e10 sum carries rounding noise near the
+    #: size of the smallest real change (0.0001 on one customer), and no tolerance separates them.
+    weighted_monetary_value_e4: int
+
+
+#: Every prediction column the report or the dashboard reads a number from. A column missing here
+#: can be edited after the fit without any guard noticing.
+FINGERPRINTED_PREDICTIONS = (
+    "expected_purchases",
+    "expected_forward_revenue",
+    "expected_avg_value",
+    "probability_alive",
+)
+
+
+@dataclass(frozen=True)
+class PredictionFingerprint:
+    """A summary of the predictions a fit wrote, so edits made after the fit are detectable.
+
+    The calibration fingerprint says the *inputs* have not moved since the fit. It says nothing
+    about the output. The Phase 4 audit multiplied every prediction by 1.167 on a copy of the
+    warehouse and got a 0% holdout error, with every post-fit guard green.
+
+    Three sums per column, because the re-audit found three kinds of edit a single sum misses:
+
+    * ``sum_`` sees scaling and constant overwrites, such as probability_alive set to 1.
+    * ``weighted_`` weights each row by its customer's rank in ``customer_id`` order, so moving
+      values between customers moves it. Dense rank, because each customer has one row per
+      horizon.
+    * ``horizon_weighted_`` weights each row by its ``horizon_days``. Swapping the 273- and
+      365-day labels leaves every other sum untouched, and it made the model look 8.8% high
+      instead of 14.3% low.
+
+    Held as a dict keyed by the ``fit_runs`` column name. The dbt test that reads them keeps its own
+    copy of the column list, because dbt cannot import Python, and tests/test_fingerprint.py fails
+    if the two lists differ.
+    """
+
+    values: dict[str, float]
+
+    @classmethod
+    def of(cls, predictions: pd.DataFrame) -> PredictionFingerprint:
+        rank = predictions["customer_id"].rank(method="dense")
+        horizon = predictions["horizon_days"].astype(float)
+        values = {}
+        for column in FINGERPRINTED_PREDICTIONS:
+            value = predictions[column].astype(float)
+            values[f"sum_{column}"] = float(value.sum())
+            values[f"weighted_{column}"] = float((rank * value).sum())
+            values[f"horizon_weighted_{column}"] = float((horizon * value).sum())
+        return cls(values=values)
+
+
+@dataclass(frozen=True)
 class CalibrationData:
     """Everything the models are fitted on, plus the window that defines it."""
 
     source: str
     customers: pd.DataFrame
     holdout_days: int
+
+    @property
+    def fingerprint(self) -> CalibrationFingerprint:
+        """Summarise the frame actually being fitted, not the relation it was meant to come from."""
+        customers = self.customers
+        # Ranked rather than positional, so the weights do not depend on the frame's row order.
+        rank = customers["customer_id"].rank(method="first").astype("int64")
+        return CalibrationFingerprint(
+            rows=len(customers),
+            sum_frequency=int(customers["frequency"].sum()),
+            sum_recency=int(customers["recency"].sum()),
+            sum_customer_age=int(customers["customer_age"].sum()),
+            sum_monetary_value=float(customers["monetary_value"].sum()),
+            weighted_frequency=int((rank * customers["frequency"]).sum()),
+            weighted_recency=int((rank * customers["recency"]).sum()),
+            weighted_customer_age=int((rank * customers["customer_age"]).sum()),
+            weighted_monetary_value_e4=int(
+                (
+                    rank
+                    * (customers["monetary_value"].astype(float) * 10_000).round().astype("int64")
+                ).sum()
+            ),
+        )
 
     @property
     def eligible(self) -> pd.DataFrame:
